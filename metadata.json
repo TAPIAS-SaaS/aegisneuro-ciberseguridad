@@ -1,0 +1,6 @@
+{
+  "name": "AegisNeuro — Sistema Inteligente de Aprendizaje de Ciberseguridad",
+  "description": "Plataforma de ingeniería en ciberseguridad basada en neuroeducación, Active Recall, repetición espaciada FSRS, práctica deliberada e intercalada, máquinas virtuales interactivas y tutoría socrática.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
