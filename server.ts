@@ -15,7 +15,10 @@ const PORT = Number(process.env.PORT) || 3000;
 const SocraticRequestSchema = z.object({
   question: z.string().trim().min(1, 'La consulta no puede estar vacía.').max(1500, 'La consulta excede el límite de 1500 caracteres.'),
   studentLevel: z.enum(['Principiante', 'Intermedio', 'Avanzado', 'Senior']).optional().default('Principiante'),
+  learningStyle: z.enum(['visual_analogies', 'step_by_step_commands', 'deep_technical']).optional().default('visual_analogies'),
   activeModuleTitle: z.string().trim().max(200).optional().default('Ciberseguridad Aplicada'),
+  activeLessonTitle: z.string().trim().max(200).optional().default(''),
+  terminalContext: z.string().trim().max(800).optional().default(''),
   weakConcepts: z.array(z.string().trim().max(120)).max(15).optional().default([]),
   mode: z.enum(['socratic', 'simplify_for_beginner', 'evaluate_self_explanation']).optional().default('socratic'),
   hintLevel: z.number().int().min(1).max(3).optional().default(1),
@@ -52,7 +55,7 @@ function isRateLimited(ip: string): boolean {
 
 function getGenAIClient(): GoogleGenAI | null {
   const envKey = process.env.GEMINI_API_KEY;
-  if (!envKey || envKey === 'MY_GEMINI_API_KEY' || envKey.trim() === '') {
+  if (!envKey || envKey === 'MY_GEMINI_API_KEY' || envKey.trim() === '' || envKey.startsWith('AQ.')) {
     return null;
   }
 
@@ -182,16 +185,17 @@ async function startServer() {
     }
 
     const systemInstruction = [
-      'Eres el Tutor Socrático de AegisNeuro, una plataforma científica de formación en ciberseguridad.',
-      `Nivel actual del estudiante: ${payload.studentLevel}. Módulo activo: ${payload.activeModuleTitle}. Modo: ${payload.mode}. Nivel de pista solicitado: ${payload.hintLevel}/3.`,
+      'Eres el Mentor Socrático Personalizado de AegisNeuro, una plataforma científica de formación en ciberseguridad estilo TryHackMe.',
+      `Nivel actual del estudiante: ${payload.studentLevel}. Estilo de aprendizaje preferido: ${payload.learningStyle}. Módulo activo: ${payload.activeModuleTitle}. Lección activa: ${payload.activeLessonTitle || 'General'}. Modo: ${payload.mode}. Nivel de pista solicitado: ${payload.hintLevel}/3.`,
+      payload.terminalContext ? `Contexto reciente de la terminal VM del estudiante: ${payload.terminalContext}` : '',
       `Conceptos que el estudiante debe reforzar en su memoria espaciada: ${payload.weakConcepts.length > 0 ? payload.weakConcepts.join(', ') : 'ninguno registrado aún'}.`,
       'REGLAS SOCRÁTICAS ESTRICTAS E INQUEBRANTABLES:',
       '1. PROHIBIDO dar la solución final, el comando completo de explotación listo para copiar y pegar, o cualquier bandera FLAG{...}.',
       '2. Haz SIEMPRE UNA SOLA pregunta socrática al final de tu respuesta para guiar al alumno a descubrir el siguiente paso por sí mismo.',
-      '3. Adapta la ayuda a 3 niveles: Nivel 1 = empujón conceptual/analogía; Nivel 2 = qué concepto o mecanismo técnico mirar; Nivel 3 = estructura general de la herramienta sin revelar la respuesta exacta del ejercicio.',
+      '3. Si el estilo es "visual_analogies", usa analogías cotidianas muy claras para alguien que empieza desde cero. Si es "step_by_step_commands", explica qué hace cada parámetro en la consola.',
       '4. Si el modo es "evaluate_self_explanation", evalúa si el alumno explicó el mecanismo causal (por qué ocurre y cómo se mitiga), señala qué parte estuvo bien y hazle 1 pregunta sobre lo que le faltó precisar.',
       '5. Responde siempre en español claro y riguroso.',
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 
     const contents = [
       ...payload.history.map((turn) => ({
@@ -206,7 +210,7 @@ async function startServer() {
 
     try {
       const response = await ai.models.generateContent({
-        model: 'gemini-3.5-flash',
+        model: 'gemini-3.8-flash',
         contents,
         config: {
           systemInstruction,
@@ -225,7 +229,7 @@ async function startServer() {
       return res.json({
         reply: replyText,
         source: 'ai',
-        modelUsed: 'gemini-3.5-flash',
+        modelUsed: 'gemini-3.8-flash',
       });
     } catch (_err) {
       return res.json({

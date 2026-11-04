@@ -19,6 +19,7 @@ import {
   Award,
   Code2,
   Layers,
+  Check,
 } from 'lucide-react';
 import type { CurriculumModule, ActiveRecallQuestion } from '../data/curriculumData';
 import {
@@ -42,6 +43,11 @@ import {
   resetVMNodeState,
 } from '../utils/vmEngine';
 import { validateTaskAnswer } from '../utils/validation';
+import {
+  LEARNING_STYLE_META,
+  askAIMentor,
+  type LearningStyle,
+} from '../utils/aiMentorEngine';
 import { ArchitectureDiagram } from './ArchitectureDiagram';
 import { ExerciseVMWorkbench, type VMLogLine } from './ExerciseVMWorkbench';
 import type { EngineeringNote } from './StudentDashboard';
@@ -68,12 +74,75 @@ interface CurriculumViewProps {
     errorsCommitted: string,
     commandsUsed: string
   ) => void;
+  learningStyle: LearningStyle;
+  onChangeLearningStyle: (style: LearningStyle) => void;
 }
 
 interface TutorTurn {
   role: 'user' | 'assistant';
   content: string;
-  source?: 'ai' | 'fallback';
+  source?: 'ai' | 'local-adaptive';
+}
+
+interface UnifiedLessonItem {
+  index: number;
+  lessonBadge: string;
+  title: string;
+  paragraphs: string[];
+  keyTakeaways: string[];
+  codeOrCommandExample?: string;
+}
+
+function renderFormattedAIText(raw: string): React.ReactNode {
+  const lines = raw.split('\n');
+  const formatInline = (text: string) => {
+    const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+    return parts.map((part, i) => {
+      if (part.startsWith('**') && part.endsWith('**')) {
+        return (
+          <strong key={i} className="font-bold text-white">
+            {part.slice(2, -2)}
+          </strong>
+        );
+      }
+      if (part.startsWith('`') && part.endsWith('`')) {
+        return (
+          <code
+            key={i}
+            className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-[#88CC14] font-mono text-xs"
+          >
+            {part.slice(1, -1)}
+          </code>
+        );
+      }
+      return part;
+    });
+  };
+
+  return (
+    <div className="space-y-1.5">
+      {lines.map((line, idx) => {
+        const trimmed = line.trim();
+        if (!trimmed) return <div key={idx} className="h-1" />;
+        if (trimmed.startsWith('### ')) {
+          return (
+            <h4 key={idx} className="text-xs sm:text-sm font-bold text-[#88CC14] font-mono pt-1">
+              {trimmed.replace(/^###\s+/, '')}
+            </h4>
+          );
+        }
+        if (trimmed.startsWith('- ')) {
+          return (
+            <div key={idx} className="flex items-start gap-2 pl-1">
+              <span className="text-[#88CC14] font-bold">•</span>
+              <span>{formatInline(trimmed.slice(2))}</span>
+            </div>
+          );
+        }
+        return <p key={idx}>{formatInline(trimmed)}</p>;
+      })}
+    </div>
+  );
 }
 
 export const CurriculumView: React.FC<CurriculumViewProps> = ({
@@ -88,6 +157,8 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
   onCreateFlashcardFromModule,
   moduleNotes,
   onSaveModuleNote,
+  learningStyle,
+  onChangeLearningStyle,
 }) => {
   const activeModule = modules.find((m) => m.id === selectedModuleId) ?? modules[0];
   const currentIndex = modules.findIndex((m) => m.id === activeModule.id);
@@ -117,6 +188,12 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
 
   // Guided Step (1 to 5)
   const [activeStep, setActiveStep] = useState<number>(1);
+  // Sub-Tab inside Task 1 ('lessons' | 'anatomy' | 'cheatsheet')
+  const [task1SubTab, setTask1SubTab] = useState<'lessons' | 'anatomy' | 'cheatsheet'>('lessons');
+  // Step-by-step lesson index inside Task 1 (0 to 5, or -1 for "Ver todas")
+  const [activeLessonIdx, setActiveLessonIdx] = useState<number>(0);
+  const [readLessons, setReadLessons] = useState<Record<number, boolean>>({});
+
   // Split-Screen VM toggle (automatically active on Steps 3 & 4, or toggleable anytime)
   const [splitScreenEnabled, setSplitScreenEnabled] = useState<boolean>(false);
   const [copiedCmdToast, setCopiedCmdToast] = useState<string | null>(null);
@@ -130,10 +207,11 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
   const [hintLevels, setHintLevels] = useState<Record<string, number>>({});
   const [predictionRevealed, setPredictionRevealed] = useState(false);
 
-  // Socratic Tutor Drawer State with Multi-turn History & Honest Source Label
+  // Socratic AI Mentor Drawer State
   const [aiQuestion, setAiQuestion] = useState('');
   const [aiHistory, setAiHistory] = useState<TutorTurn[]>([]);
-  const [aiSource, setAiSource] = useState<'ai' | 'fallback' | null>(null);
+  const [aiSource, setAiSource] = useState<'ai' | 'local-adaptive' | null>(null);
+  const [aiSuggestedChips, setAiSuggestedChips] = useState<string[]>([]);
   const [tutorHintLevel, setTutorHintLevel] = useState<number>(1);
   const [aiLoading, setAiLoading] = useState(false);
   const [showAiDrawer, setShowAiDrawer] = useState(false);
@@ -155,7 +233,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
     typeof evaluateSelfExplanationLocal
   > | null>(null);
   const [aiEvaluationFeedback, setAiEvaluationFeedback] = useState<string | null>(null);
-  const [aiEvaluationSource, setAiEvaluationSource] = useState<'ai' | 'fallback' | null>(null);
+  const [aiEvaluationSource, setAiEvaluationSource] = useState<'ai' | 'local-adaptive' | null>(null);
   const [aiEvaluating, setAiEvaluating] = useState(false);
 
   // Flashcard Active Retrieval before Flip (Step 5)
@@ -185,6 +263,48 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
   const [capturedFlag, setCapturedFlag] = useState<string | null>(null);
   const [lastExecutedExplanation, setLastExecutedExplanation] = useState<string | null>(null);
 
+  const task1 = roomTasks[0];
+  const task2 = roomTasks[1];
+  const task3 = roomTasks[2];
+  const task4 = roomTasks[3];
+
+  // Build unified 6-lesson array for structured step-by-step beginner learning
+  const unifiedLessons = useMemo<UnifiedLessonItem[]>(() => {
+    const items: UnifiedLessonItem[] = [];
+    const baseSections = activeModule.theorySections ?? [];
+    const extraIntro = task1?.readingParagraphs ?? [];
+
+    baseSections.forEach((sec, idx) => {
+      const extraPara = extraIntro[idx] ? [extraIntro[idx]] : [];
+      items.push({
+        index: idx,
+        lessonBadge: `Lección ${idx + 1} de ${baseSections.length + (deepExpansion?.extendedSubModules?.length ?? 0)}`,
+        title: sec.heading,
+        paragraphs: [sec.content, ...extraPara].filter(Boolean),
+        keyTakeaways: [
+          activeModule.objectives[idx] || activeModule.objectives[0] || '',
+        ].filter(Boolean),
+        codeOrCommandExample:
+          sec.codeSnippet || deepExpansion?.commandCheatSheet?.[idx]?.command,
+      });
+    });
+
+    (deepExpansion?.extendedSubModules ?? []).forEach((sub, idx) => {
+      const num = baseSections.length + idx + 1;
+      const total = baseSections.length + (deepExpansion?.extendedSubModules?.length ?? 0);
+      items.push({
+        index: num - 1,
+        lessonBadge: `Lección ${num} de ${total}`,
+        title: sub.title.replace(/^\d+\.\s*/, ''),
+        paragraphs: sub.deepExplanation,
+        keyTakeaways: sub.keyTakeaways,
+        codeOrCommandExample: sub.codeOrCommandExample,
+      });
+    });
+
+    return items;
+  }, [activeModule, task1, deepExpansion]);
+
   const initVmBanner = (node = vmNode) => {
     setVmUser(node.user);
     setVmCwd(node.cwd);
@@ -194,7 +314,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
     setVmLogs([
       {
         type: 'output',
-        text: `[Estación de Práctica Interactiva] Nodo: ${node.hostname} (${node.ip})\nSistema Operativo: ${node.os}\nEscribe 'help' para ver los comandos disponibles, usa 'pwd', 'ls -la', 'cd', 'cat' o sigue los objetivos del laboratorio.`,
+        text: `[Estación AttackBox Interactiva] Nodo: ${node.hostname} (${node.ip})\nSistema Operativo: ${node.os}\nEscribe 'help' para ver los comandos disponibles, usa 'pwd', 'ls -la', 'cd', 'cat' o haz clic en los Pasos Guiados de arriba.`,
       },
     ]);
   };
@@ -202,6 +322,9 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
   // Reset state when switching modules
   useEffect(() => {
     setActiveStep(1);
+    setTask1SubTab('lessons');
+    setActiveLessonIdx(0);
+    setReadLessons({});
     setSplitScreenEnabled(false);
     setSelectedAnswers({});
     setQuizSubmitted(false);
@@ -214,6 +337,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
     setAiEvaluationSource(null);
     setAiHistory([]);
     setAiSource(null);
+    setAiSuggestedChips([]);
     setShowAiDrawer(false);
     setPredictionRevealed(false);
     setHintLevels({});
@@ -290,10 +414,16 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
     handleRunVMCommand(cmd, explanation);
   };
 
-  // Call Socratic Tutor endpoint with conversation history and hint level
+  // Call Personalized AI Mentor
   const handleAskSocraticTutor = async (
     customPrompt?: string,
-    mode: 'socratic' | 'simplify_for_beginner' = 'socratic'
+    mode:
+      | 'socratic'
+      | 'simplify_for_beginner'
+      | 'explain_terminal_command'
+      | 'personalized_study_plan' = 'socratic',
+    terminalCmd?: string,
+    terminalOut?: string
   ) => {
     const query = (customPrompt ?? aiQuestion).trim();
     if (!query || aiLoading) return;
@@ -301,55 +431,36 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
     setShowAiDrawer(true);
     setAiLoading(true);
     const nextUserTurn: TutorTurn = { role: 'user', content: query };
-    const historyForApi = aiHistory.slice(-10).map((h) => ({
+    const historyForApi = aiHistory.slice(-8).map((h) => ({
       role: h.role,
       content: h.content,
     }));
 
+    const currentLessonObj =
+      activeLessonIdx >= 0 ? unifiedLessons[activeLessonIdx] : unifiedLessons[0];
+
     try {
-      const response = await fetch('/api/tutor/socratic', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          question: query,
-          studentLevel:
-            activeModule.tier === 'Fundamentos'
-              ? 'Principiante'
-              : activeModule.tier === 'Intermedio'
-                ? 'Intermedio'
-                : 'Avanzado',
-          activeModuleTitle: `${activeModule.number} · ${activeModule.title}`,
-          weakConcepts: activeModule.selfExplanationPrompt.keyTerms,
-          mode,
-          hintLevel: tutorHintLevel,
-          history: historyForApi,
-        }),
+      const result = await askAIMentor({
+        question: query,
+        learningStyle,
+        activeModule,
+        activeStepNum: activeStep,
+        activeLessonTitle: currentLessonObj?.title,
+        lastTerminalCommand: terminalCmd,
+        lastTerminalOutput: terminalOut,
+        mode,
+        hintLevel: tutorHintLevel,
+        history: historyForApi,
       });
-      const data = await response.json();
-      const source: 'ai' | 'fallback' = data.source === 'ai' ? 'ai' : 'fallback';
-      const replyText =
-        data.reply ||
-        'Reflexiona sobre la tabla técnica de esta sala: ¿qué mecanismo valida la entrada o el permiso en este paso?';
-      setAiSource(source);
+
+      setAiSource(result.source);
+      setAiSuggestedChips(result.suggestedFollowUps);
       setAiHistory((prev) => [
         ...prev,
         nextUserTurn,
-        { role: 'assistant', content: replyText, source },
+        { role: 'assistant', content: result.reply, source: result.source },
       ]);
       if (!customPrompt) setAiQuestion('');
-    } catch {
-      const fallbackText = [
-        `### Guía Socrática Local · ${activeModule.title} (Pista Nivel ${tutorHintLevel}/3)`,
-        '',
-        `- **Concepto clave:** Revisa cómo interactúan **${activeModule.selfExplanationPrompt.keyTerms.slice(0, 3).join(', ')}** dentro de esta sala.`,
-        `- **Pregunta guía (1 sola):** ¿Qué elemento del sistema confía en la entrada o permiso sin verificarlo primero?`,
-      ].join('\n');
-      setAiSource('fallback');
-      setAiHistory((prev) => [
-        ...prev,
-        nextUserTurn,
-        { role: 'assistant', content: fallbackText, source: 'fallback' },
-      ]);
     } finally {
       setAiLoading(false);
     }
@@ -477,39 +588,27 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
     if (explanationDraft.trim().length >= 15) {
       setAiEvaluating(true);
       try {
-        const response = await fetch('/api/tutor/socratic', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            question: `Evalúa socráticamente esta autoexplicación del estudiante sobre "${activeModule.selfExplanationPrompt.question}": "${explanationDraft}". Conceptos esperados: ${activeModule.selfExplanationPrompt.keyTerms.join(', ')}.`,
-            studentLevel: 'Intermedio',
-            activeModuleTitle: activeModule.title,
-            weakConcepts: res.missingTerms,
-            mode: 'evaluate_self_explanation',
-          }),
+        const aiRes = await askAIMentor({
+          question: `Evalúa socráticamente esta autoexplicación del estudiante sobre "${activeModule.selfExplanationPrompt.question}": "${explanationDraft}". Conceptos esperados: ${activeModule.selfExplanationPrompt.keyTerms.join(', ')}.`,
+          learningStyle,
+          activeModule,
+          mode: 'evaluate_self_explanation',
         });
-        const data = await response.json();
-        if (data.reply) {
-          setAiEvaluationFeedback(data.reply);
-          setAiEvaluationSource(data.source === 'ai' ? 'ai' : 'fallback');
-        }
-      } catch {
-        // Local rubric already shown
+        setAiEvaluationFeedback(aiRes.reply);
+        setAiEvaluationSource(aiRes.source);
       } finally {
         setAiEvaluating(false);
       }
     }
   };
 
-  const totalLessonsCount =
-    activeModule.theorySections.length +
-    (deepExpansion?.extendedSubModules?.length ?? 0);
+  const totalLessonsCount = unifiedLessons.length;
 
   const stepsMeta = [
     {
       num: 1,
       shortTitle: `Task 1 · Teoría (${totalLessonsCount} Lecciones)`,
-      subtitle: '6 Lecciones + Anatomía + Cheat Sheet',
+      subtitle: 'Paso a Paso + Anatomía + Cheat Sheet',
       hasVM: false,
     },
     {
@@ -544,10 +643,6 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
     Math.max(masteryLevel * 33, Math.round((completedCount / 5) * 100))
   );
 
-  const task1 = roomTasks[0];
-  const task2 = roomTasks[1];
-  const task3 = roomTasks[2];
-  const task4 = roomTasks[3];
   const q1 = task1?.taskQuestions?.[0];
   const q3 = task3?.taskQuestions?.[0];
   const q4 = task4?.taskQuestions?.[0];
@@ -560,42 +655,68 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
   const activeVMCommandBlocks =
     activeStep === 4 ? task4?.commandBlocks ?? [] : task3?.commandBlocks ?? [];
   const activeVMScaffolding =
-    activeStep === 4 ? task4?.scaffoldingLevel ?? deepExtras.scaffoldingLevel : task3?.scaffoldingLevel ?? deepExtras.scaffoldingLevel;
+    activeStep === 4
+      ? task4?.scaffoldingLevel ?? deepExtras.scaffoldingLevel
+      : task3?.scaffoldingLevel ?? deepExtras.scaffoldingLevel;
+
+  const lessonsToDisplay =
+    activeLessonIdx === -1
+      ? unifiedLessons
+      : [unifiedLessons[Math.min(activeLessonIdx, unifiedLessons.length - 1)]].filter(
+          Boolean
+        );
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
-      {/* Top Room Header */}
+    <div
+      className={`${
+        showSideBySideVM ? 'max-w-[1600px]' : 'max-w-5xl'
+      } mx-auto space-y-5 transition-all duration-200`}
+    >
+      {/* Top TryHackMe-Style Room Header */}
       <div className="bg-[#161E2E] border border-slate-800 rounded-2xl p-5 sm:p-6 text-white shadow-md">
         <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-800">
-          <button
-            onClick={onBackToPath}
-            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-          >
-            <ArrowLeft className="w-3.5 h-3.5 text-[#88CC14]" />
-            Volver al Mapa de Rutas
-          </button>
-
-          <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
-            <span className="text-[#88CC14] font-semibold uppercase tracking-wider">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={onBackToPath}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <ArrowLeft className="w-3.5 h-3.5 text-[#88CC14]" />
+              Mapa de Rutas
+            </button>
+            <span className="text-slate-600 font-mono">/</span>
+            <span className="text-xs font-mono text-[#88CC14] font-semibold uppercase">
               {deepExtras.careerPath}
             </span>
-            <span className="text-slate-600">·</span>
-            <span className="text-slate-200">{masteryInfo.badge}</span>
-            {deepExpansion?.competencyBadge && (
-              <>
-                <span className="text-slate-600">·</span>
-                <span
-                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border ${
-                    masteryLevel >= 2
-                      ? 'bg-[#88CC14]/20 border-[#88CC14]/50 text-[#88CC14] font-bold'
-                      : 'bg-slate-900 border-slate-700 text-slate-400'
+            <span className="text-slate-600 font-mono">/</span>
+            <span className="text-xs font-mono text-slate-200">
+              Sala {activeModule.number}
+            </span>
+          </div>
+
+          {/* AI Learning Profile Selector right in the Room Header */}
+          <div className="flex flex-wrap items-center gap-1.5 bg-[#0F172A] p-1 rounded-xl border border-slate-800">
+            <span className="text-[11px] font-mono text-slate-400 px-2">
+              Tu Modo IA:
+            </span>
+            {(Object.keys(LEARNING_STYLE_META) as LearningStyle[]).map((styleKey) => {
+              const meta = LEARNING_STYLE_META[styleKey];
+              const isSelected = learningStyle === styleKey;
+              return (
+                <button
+                  key={styleKey}
+                  type="button"
+                  onClick={() => onChangeLearningStyle(styleKey)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-mono transition-colors cursor-pointer ${
+                    isSelected
+                      ? 'bg-[#88CC14] text-slate-950 font-bold'
+                      : 'text-slate-300 hover:text-white'
                   }`}
+                  title={meta.description}
                 >
-                  <Award className="w-3.5 h-3.5" />
-                  {deepExpansion.competencyBadge.code}: {deepExpansion.competencyBadge.name}
-                </span>
-              </>
-            )}
+                  {meta.shortLabel}
+                </button>
+              );
+            })}
           </div>
 
           <div className="flex items-center gap-2">
@@ -605,7 +726,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
               onClick={() => prevModule && onSelectModule(prevModule.id)}
               className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-xs text-slate-200 flex items-center gap-1 cursor-pointer"
             >
-              <ArrowLeft className="w-3.5 h-3.5" /> Sala Anterior
+              <ArrowLeft className="w-3.5 h-3.5" /> Anterior
             </button>
             <button
               type="button"
@@ -613,20 +734,27 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
               onClick={() => nextModule && onSelectModule(nextModule.id)}
               className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-xs text-slate-200 flex items-center gap-1 cursor-pointer"
             >
-              Siguiente Sala <ArrowRight className="w-3.5 h-3.5" />
+              Siguiente <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
 
+        {/* Room Title + Target Machine Bar + Primary Controls */}
         <div className="pt-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="space-y-1.5">
+          <div className="flex-1 min-w-0 space-y-1.5">
             <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
-              <span className="px-2 py-0.5 rounded font-bold bg-[#88CC14] text-slate-950">
+              <span className="px-2 py-0.5 rounded font-bold bg-[#88CC14] text-slate-950 whitespace-nowrap">
                 SALA {activeModule.number} ({currentIndex + 1} DE {modules.length})
               </span>
-              <span className="text-slate-400">
-                Nivel: {activeModule.tier} · {activeModule.estimatedHours}h estimadas · {totalLessonsCount} Lecciones Técnicas · Práctica: {progress.practiceMinutes} min activos
+              <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-emerald-300 whitespace-nowrap">
+                MÁQUINA OBJETIVO: {vmNode.hostname} ({vmNode.ip})
               </span>
+              {deepExpansion?.competencyBadge && (
+                <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300 inline-flex items-center gap-1 whitespace-nowrap">
+                  <Award className="w-3 h-3 text-[#88CC14]" />
+                  {deepExpansion.competencyBadge.code}
+                </span>
+              )}
             </div>
             <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
               {activeModule.title}
@@ -637,19 +765,20 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            {/* TryHackMe Start AttackBox Split-Screen Button */}
             <button
               type="button"
               onClick={() => setSplitScreenEnabled((prev) => !prev)}
-              className={`px-3.5 py-2 rounded-xl font-bold text-xs flex items-center gap-2 border transition-colors cursor-pointer ${
+              className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 border transition-colors cursor-pointer ${
                 showSideBySideVM
-                  ? 'bg-sky-500/20 border-sky-400 text-sky-200'
-                  : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-200'
+                  ? 'bg-sky-500/20 border-sky-400 text-sky-200 shadow-xs'
+                  : 'bg-[#0F172A] hover:bg-slate-800 border-sky-500/50 text-sky-300'
               }`}
             >
               <Columns2 className="w-4 h-4 text-sky-400" />
               {showSideBySideVM
-                ? 'Pantalla Dividida VM Activa'
-                : 'Abrir Estación Linux Lateral'}
+                ? 'Ocultar AttackBox Lateral'
+                : 'Iniciar AttackBox (Pantalla Dividida)'}
             </button>
 
             <button
@@ -658,18 +787,18 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                 setShowAiDrawer((prev) => !prev);
                 if (aiHistory.length === 0) {
                   handleAskSocraticTutor(
-                    `Explícame con una analogía sencilla los fundamentos de "${activeModule.title}" y hazme una pregunta socrática para empezar.`,
+                    `Explícame con una analogía sencilla los fundamentos de "${activeModule.title}" según mi perfil (${LEARNING_STYLE_META[learningStyle].shortLabel}).`,
                     'simplify_for_beginner'
                   );
                 }
               }}
-              className="px-3.5 py-2 rounded-xl bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-colors whitespace-nowrap cursor-pointer"
+              className="px-4 py-2.5 rounded-xl bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-colors whitespace-nowrap cursor-pointer"
             >
               <Sparkles className="w-4 h-4" />
-              Tutor Socrático
+              Mentor IA Personalizado
             </button>
 
-            <div className="bg-[#0F172A] border border-slate-800 rounded-lg px-3.5 py-2 w-44">
+            <div className="bg-[#0F172A] border border-slate-800 rounded-xl px-3.5 py-2 w-40">
               <div className="flex items-center justify-between text-xs mb-1">
                 <span className="text-slate-400 font-medium">Avance Sala</span>
                 <span className="font-mono font-bold text-[#88CC14] tabular-nums">
@@ -742,7 +871,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2 text-xs font-mono text-[#88CC14] font-bold">
-                <span>¡BANDERA CAPTURADA EN LA ESTACIÓN LINUX!</span>
+                <span>¡BANDERA CAPTURADA EN ATTACKBOX LINUX!</span>
                 {deepExpansion?.competencyBadge && (
                   <span>· {deepExpansion.competencyBadge.code}</span>
                 )}
@@ -766,7 +895,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
         </div>
       )}
 
-      {/* Collapsible Socratic Tutor Drawer */}
+      {/* Collapsible Personalized AI Mentor Drawer */}
       {showAiDrawer && (
         <div className="bg-[#161E2E] border-2 border-[#88CC14] rounded-2xl p-5 text-white shadow-lg space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
@@ -776,20 +905,20 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
               </div>
               <div>
                 <h2 className="text-sm font-bold text-white flex flex-wrap items-center gap-2">
-                  Tutor Socrático Adaptativo (Nunca regala la bandera ni la respuesta final)
+                  Mentor IA Personalizado ({LEARNING_STYLE_META[learningStyle].badge})
                   {aiSource === 'ai' && (
                     <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#88CC14]/20 text-[#88CC14] border border-[#88CC14]/40">
-                      IA EN VIVO · GEMINI 3.5 FLASH
+                      IA EN VIVO · GEMINI FLASH
                     </span>
                   )}
-                  {aiSource === 'fallback' && (
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                      MODO GUÍA SOCRÁTICA LOCAL (SIN CLAVE API ACTIVA)
+                  {aiSource === 'local-adaptive' && (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-sky-500/20 text-sky-300 border border-sky-500/40">
+                      MOTOR ADAPTATIVO LOCAL ACTIVO
                     </span>
                   )}
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Te guía con 1 pregunta a la vez. Elige el nivel de pista que necesitas:
+                  Explica lecciones con analogías, analiza tus comandos en la terminal y te guía con 1 pregunta a la vez.
                 </p>
               </div>
             </div>
@@ -822,7 +951,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
             </div>
           </div>
 
-          <div className="max-h-64 overflow-y-auto space-y-2.5 pr-1">
+          <div className="max-h-72 overflow-y-auto space-y-2.5 pr-1">
             {aiHistory.map((turn, idx) => (
               <div
                 key={idx}
@@ -835,19 +964,33 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                 <div className="text-[10px] font-mono uppercase text-[#88CC14] mb-1">
                   {turn.role === 'user'
                     ? 'Tú'
-                    : turn.source === 'ai'
-                      ? 'Tutor Socrático (Gemini 3.5 Flash)'
-                      : 'Tutor Socrático (Motor Pedagógico Local)'}
+                    : `Mentor IA (${LEARNING_STYLE_META[learningStyle].shortLabel})`}
                 </div>
-                {turn.content}
+                {turn.role === 'assistant' ? renderFormattedAIText(turn.content) : turn.content}
               </div>
             ))}
             {aiLoading && (
               <div className="p-3.5 rounded-xl bg-[#0F172A] border border-slate-800 text-xs font-mono text-[#88CC14]">
-                Formulando guía socrática...
+                Analizando tu contexto y preparando explicación personalizada...
               </div>
             )}
           </div>
+
+          {/* Quick Follow-Up Prompt Chips for Beginners */}
+          {aiSuggestedChips.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {aiSuggestedChips.map((chip, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => handleAskSocraticTutor(chip, 'socratic')}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-sky-300 cursor-pointer"
+                >
+                  ✨ {chip}
+                </button>
+              ))}
+            </div>
+          )}
 
           <div className="flex flex-col sm:flex-row gap-2">
             <input
@@ -857,7 +1000,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
               onKeyDown={(e) => {
                 if (e.key === 'Enter') handleAskSocraticTutor();
               }}
-              placeholder="Escribe tu hipótesis o tu duda técnica..."
+              placeholder="Pregúntale a la IA sobre esta lección, un comando o pide una analogía..."
               className="flex-1 bg-[#0F172A] border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-white focus:outline-none focus:border-[#88CC14]"
             />
             <button
@@ -867,13 +1010,13 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
               className="px-4 py-2.5 rounded-xl bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
             >
               <Send className="w-3.5 h-3.5" />
-              Enviar al Tutor
+              Enviar a la IA
             </button>
           </div>
         </div>
       )}
 
-      {/* Main Responsive Grid: Single-column or Split-Screen (Left Task Content + Right Persistent VM) */}
+      {/* Main Responsive Grid: Single-column or Split-Screen (Left Task Content + Right Persistent AttackBox VM) */}
       <div
         className={
           showSideBySideVM
@@ -884,7 +1027,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
         {/* LEFT PANE: Active Task Content */}
         <div className={showSideBySideVM ? 'lg:col-span-6 space-y-6' : 'space-y-6'}>
           {/* =====================================================================
-              STEP 1: TEORÍA PROFUNDA (6 LECCIONES) + ANATOMÍA 4 FASES + CHEAT SHEET
+              STEP 1: TEORÍA ORGANIZADA POR PESTAÑAS Y LECCIONES PASO A PASO (1 A 6)
              ===================================================================== */}
           {activeStep === 1 && task1 && (
             <div className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
@@ -896,172 +1039,186 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                   <h2 className="text-base sm:text-lg font-bold">{task1.title}</h2>
                 </div>
                 <span className="text-xs font-mono text-[#88CC14]">
-                  {totalLessonsCount} Lecciones Completas + Anatomía + Cheat Sheet
+                  Estudio Organizado Paso a Paso
                 </span>
               </div>
 
-              <div className="p-6 sm:p-8 space-y-8">
-                {/* Learning Objectives */}
-                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                  <p className="text-xs font-mono uppercase tracking-wider text-slate-700 font-bold mb-2">
-                    OBJETIVOS DE APRENDIZAJE VERIFICABLES DE ESTA SALA:
-                  </p>
-                  <ul className="space-y-1.5">
-                    {activeModule.objectives.map((obj, idx) => (
-                      <li key={idx} className="text-sm text-slate-700 flex items-start gap-2">
-                        <span className="font-mono text-xs font-bold text-[#E11D48] mt-0.5">
-                          {idx + 1}.
+              {/* Clean Sub-Navigation Tabs inside Task 1 so the beginner is never overwhelmed */}
+              <div className="bg-slate-100 px-6 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setTask1SubTab('lessons')}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      task1SubTab === 'lessons'
+                        ? 'bg-[#161E2E] text-[#88CC14] shadow-2xs'
+                        : 'bg-white text-slate-700 hover:bg-slate-200/70 border border-slate-200'
+                    }`}
+                  >
+                    <BookOpen className="w-3.5 h-3.5" />
+                    1. Lecciones Paso a Paso ({Object.keys(readLessons).length}/{totalLessonsCount})
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setTask1SubTab('anatomy')}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      task1SubTab === 'anatomy'
+                        ? 'bg-[#161E2E] text-[#88CC14] shadow-2xs'
+                        : 'bg-white text-slate-700 hover:bg-slate-200/70 border border-slate-200'
+                    }`}
+                  >
+                    <Layers className="w-3.5 h-3.5" />
+                    2. Anatomía (4 Fases) y Tabla Resumen
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setTask1SubTab('cheatsheet')}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      task1SubTab === 'cheatsheet'
+                        ? 'bg-[#161E2E] text-[#88CC14] shadow-2xs'
+                        : 'bg-white text-slate-700 hover:bg-slate-200/70 border border-slate-200'
+                    }`}
+                  >
+                    <Terminal className="w-3.5 h-3.5" />
+                    3. Cheat Sheet de Comandos y Glosario
+                  </button>
+                </div>
+
+                <span className="text-[11px] font-mono text-slate-500">
+                  Avanza a tu ritmo sin muros de texto
+                </span>
+              </div>
+
+              <div className="p-6 sm:p-8 space-y-6">
+                {/* SUB-TAB 1: STEP-BY-STEP LESSONS (1 TO 6) */}
+                {task1SubTab === 'lessons' && (
+                  <div className="space-y-6">
+                    {/* Interactive Lesson Selector Bar */}
+                    <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-mono uppercase text-slate-700 font-bold">
+                          SELECCIONA LA LECCIÓN ACTUAL (O LEE DE LA 1 A LA {totalLessonsCount} EN ORDEN):
                         </span>
-                        <span>{obj}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                {/* Interactive Glossary for Beginners */}
-                {activeModule.glossary && activeModule.glossary.length > 0 && (
-                  <div className="p-4 rounded-xl bg-sky-50/70 border border-sky-200 space-y-2.5">
-                    <div className="flex items-center gap-2 text-xs font-mono uppercase text-sky-900 font-bold">
-                      <BookOpen className="w-4 h-4 text-sky-700" />
-                      GLOSARIO DE TÉRMINOS CLAVE (DEFINIDOS ANTES DE USARLOS):
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                      {activeModule.glossary.map((g, idx) => (
-                        <div
-                          key={idx}
-                          className="p-3 rounded-lg bg-white border border-sky-100 text-xs space-y-1"
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setActiveLessonIdx((prev) => (prev === -1 ? 0 : -1))
+                          }
+                          className="text-xs font-mono text-[#3F6212] hover:underline font-bold cursor-pointer"
                         >
-                          <span className="font-mono font-bold text-slate-900">{g.term}</span>
-                          <p className="text-slate-600 leading-relaxed">{g.definition}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Core Introduction & Foundational Lessons (Lessons 1 & 2) */}
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-                    <h3 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
-                      <Layers className="w-5 h-5 text-[#3F6212]" />
-                      Parte A · Fundamentos y Marco Conceptual (Lecciones 1 y 2)
-                    </h3>
-                    <span className="text-xs font-mono text-slate-500">
-                      Base obligatoria sin saltos
-                    </span>
-                  </div>
-
-                  {task1.readingParagraphs.map((p, idx) => (
-                    <div
-                      key={idx}
-                      className="p-5 rounded-xl bg-white border border-slate-200 shadow-2xs space-y-1.5"
-                    >
-                      <span className="text-xs font-mono uppercase text-[#3F6212] font-bold block">
-                        Fundamento {idx + 1} de {task1.readingParagraphs.length}
-                      </span>
-                      <p className="text-sm sm:text-base text-slate-800 leading-relaxed">{p}</p>
-                    </div>
-                  ))}
-                </div>
-
-                {/* "Predice antes de ver" Active Micro-Pause */}
-                {activeModule.predictionPrompt && (
-                  <div className="p-5 rounded-2xl bg-amber-50/80 border border-amber-200 space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-mono uppercase text-amber-900 font-bold flex items-center gap-1.5">
-                        <Lightbulb className="w-4 h-4 text-amber-600" />
-                        PAUSA DE PREDICCIÓN ACTIVA (PREDICE ANTES DE VER LA RESPUESTA)
-                      </span>
-                    </div>
-                    <p className="text-sm font-bold text-slate-900">
-                      {activeModule.predictionPrompt.question}
-                    </p>
-                    {!predictionRevealed ? (
-                      <button
-                        type="button"
-                        onClick={() => setPredictionRevealed(true)}
-                        className="px-4 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400 text-amber-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        Ya pensé mi predicción · Comprobar explicación
-                      </button>
-                    ) : (
-                      <div className="p-3.5 rounded-xl bg-white border border-amber-300 text-xs sm:text-sm text-slate-800 leading-relaxed">
-                        <strong className="text-emerald-800">Comprobación:</strong>{' '}
-                        {activeModule.predictionPrompt.reveal}
+                          {activeLessonIdx === -1
+                            ? 'Volver al Modo Paso a Paso (1 por vez)'
+                            : `Ver las ${totalLessonsCount} lecciones juntas`}
+                        </button>
                       </div>
-                    )}
-                  </div>
-                )}
 
-                {/* Extended Deep Sub-Modules (Lessons 3, 4, 5, 6 from deepContentExpansion) */}
-                {deepExpansion && deepExpansion.extendedSubModules.length > 0 && (
-                  <div className="space-y-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-2">
-                      <h3 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
-                        <BookOpen className="w-5 h-5 text-[#3F6212]" />
-                        Parte B · Temario Técnico Extendido (Lecciones 3 a {totalLessonsCount})
-                      </h3>
-                      <span className="text-xs font-mono text-emerald-800 font-semibold">
-                        Explicación Exhaustiva + Puntos Clave + Ejemplo Ejecutable
-                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {unifiedLessons.map((les) => {
+                          const isCurrent = activeLessonIdx === les.index;
+                          const isRead = Boolean(readLessons[les.index]);
+                          return (
+                            <button
+                              key={les.index}
+                              type="button"
+                              onClick={() => setActiveLessonIdx(les.index)}
+                              className={`px-3 py-2 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 border transition-all cursor-pointer ${
+                                isCurrent
+                                  ? 'bg-[#161E2E] text-[#88CC14] border-[#161E2E] shadow-2xs'
+                                  : isRead
+                                    ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
+                                    : 'bg-white text-slate-700 border-slate-200 hover:border-slate-400'
+                              }`}
+                            >
+                              {isRead && <Check className="w-3.5 h-3.5 text-emerald-600" />}
+                              <span>Lección {les.index + 1}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
 
+                    {/* Render Active Lesson(s) */}
                     <div className="space-y-5">
-                      {deepExpansion.extendedSubModules.map((sub) => (
+                      {lessonsToDisplay.map((les) => (
                         <div
-                          key={sub.id}
-                          className="p-5 sm:p-6 rounded-2xl bg-slate-50/80 border border-slate-200 space-y-4"
+                          key={les.index}
+                          className="p-5 sm:p-6 rounded-2xl bg-white border-2 border-slate-200 shadow-2xs space-y-5"
                         >
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <h4 className="text-base sm:text-lg font-bold text-slate-900">
-                              {sub.lessonNumber} · {sub.title}
-                            </h4>
+                          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                            <div>
+                              <span className="px-2.5 py-0.5 rounded bg-emerald-100 text-[#3F6212] text-xs font-mono font-bold">
+                                {les.lessonBadge}
+                              </span>
+                              <h3 className="text-lg sm:text-xl font-bold text-slate-900 mt-1.5">
+                                {les.title}
+                              </h3>
+                            </div>
+
+                            {/* Personalized AI Explain Button per Lesson */}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleAskSocraticTutor(
+                                  `Explícame la "${les.lessonBadge}: ${les.title}" de forma sencilla según mi estilo (${LEARNING_STYLE_META[learningStyle].shortLabel}) y ponme un ejemplo claro.`,
+                                  'simplify_for_beginner'
+                                )
+                              }
+                              className="px-3.5 py-2 rounded-xl bg-[#161E2E] hover:bg-slate-800 text-[#88CC14] text-xs font-mono font-bold flex items-center gap-1.5 cursor-pointer shrink-0"
+                            >
+                              <Sparkles className="w-3.5 h-3.5" />
+                              Explicar esta lección con IA
+                            </button>
                           </div>
-                          <div className="space-y-3">
-                            {sub.deepExplanation.map((paragraph, pIdx) => (
+
+                          {/* Paragraphs */}
+                          <div className="space-y-3.5">
+                            {les.paragraphs.map((p, pIdx) => (
                               <p
                                 key={pIdx}
                                 className="text-sm sm:text-base text-slate-800 leading-relaxed"
                               >
-                                {paragraph}
+                                {p}
                               </p>
                             ))}
                           </div>
 
                           {/* Key Takeaways */}
-                          <div className="p-3.5 rounded-xl bg-white border border-slate-200 space-y-1.5">
-                            <span className="text-xs font-mono uppercase text-slate-500 font-bold block">
-                              PUNTOS CLAVE A DOMINAR EN ESTA LECCIÓN:
-                            </span>
-                            <ul className="space-y-1">
-                              {sub.keyTakeaways.map((kt, kIdx) => (
-                                <li
-                                  key={kIdx}
-                                  className="text-xs sm:text-sm text-slate-700 flex items-start gap-2"
-                                >
-                                  <span className="text-[#3F6212] font-bold">✓</span>
-                                  <span>{kt}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
+                          {les.keyTakeaways.length > 0 && (
+                            <div className="p-4 rounded-xl bg-emerald-50/60 border border-emerald-200 space-y-1.5">
+                              <span className="text-xs font-mono uppercase text-emerald-950 font-bold block">
+                                LO MÁS IMPORTANTE DE ESTA LECCIÓN:
+                              </span>
+                              <ul className="space-y-1">
+                                {les.keyTakeaways.map((kt, kIdx) => (
+                                  <li
+                                    key={kIdx}
+                                    className="text-xs sm:text-sm text-slate-800 flex items-start gap-2"
+                                  >
+                                    <span className="text-[#3F6212] font-bold">✓</span>
+                                    <span>{kt}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
 
-                          {/* Code or Command Example */}
-                          {sub.codeOrCommandExample && (
+                          {/* Executable Command / Snippet */}
+                          {les.codeOrCommandExample && (
                             <div className="rounded-xl bg-[#0F172A] border border-slate-800 p-4 space-y-2">
                               <div className="flex flex-wrap items-center justify-between gap-2">
                                 <span className="text-[11px] font-mono uppercase text-[#88CC14] font-bold">
-                                  EJEMPLO TÉCNICO / COMANDO DE AUDITORÍA
+                                  COMANDO / EJEMPLO PRÁCTICO DE ESTA LECCIÓN
                                 </span>
                                 <div className="flex items-center gap-1.5">
                                   <button
                                     type="button"
-                                    onClick={() => handleCopyCommand(sub.codeOrCommandExample!)}
+                                    onClick={() => handleCopyCommand(les.codeOrCommandExample!)}
                                     className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-mono flex items-center gap-1 cursor-pointer"
                                   >
                                     <Copy className="w-3 h-3" />
-                                    {copiedCmdToast === sub.codeOrCommandExample
+                                    {copiedCmdToast === les.codeOrCommandExample
                                       ? 'Copiado'
                                       : 'Copiar'}
                                   </button>
@@ -1069,180 +1226,300 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                                     type="button"
                                     onClick={() =>
                                       handleSendCommandToVM(
-                                        sub.codeOrCommandExample!.split('\n')[0],
-                                        sub.title
+                                        les.codeOrCommandExample!.split('\n')[0],
+                                        les.title
                                       )
                                     }
                                     className="px-2.5 py-1 rounded bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-bold text-[11px] font-mono flex items-center gap-1 cursor-pointer"
                                   >
                                     <Terminal className="w-3 h-3" />
-                                    Probar en Consola VM
+                                    Probar en AttackBox
                                   </button>
                                 </div>
                               </div>
                               <pre className="text-xs font-mono text-slate-100 overflow-x-auto whitespace-pre-wrap">
-                                {sub.codeOrCommandExample}
+                                {les.codeOrCommandExample}
                               </pre>
+                            </div>
+                          )}
+
+                          {/* Step-by-Step Lesson Navigation Footer */}
+                          {activeLessonIdx !== -1 && (
+                            <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                              <button
+                                type="button"
+                                disabled={les.index === 0}
+                                onClick={() => setActiveLessonIdx(Math.max(0, les.index - 1))}
+                                className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-800 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                              >
+                                <ArrowLeft className="w-3.5 h-3.5" />
+                                Lección Anterior
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setReadLessons((prev) => ({ ...prev, [les.index]: true }));
+                                  if (les.index < unifiedLessons.length - 1) {
+                                    setActiveLessonIdx(les.index + 1);
+                                  } else {
+                                    setTask1SubTab('anatomy');
+                                  }
+                                }}
+                                className="px-4 py-2.5 rounded-xl bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 text-xs sm:text-sm font-bold flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                              >
+                                <CheckCircle2 className="w-4 h-4" />
+                                {les.index < unifiedLessons.length - 1
+                                  ? `Marcar comprendida e ir a Lección ${les.index + 2}`
+                                  : 'Completar Lecciones y ver Anatomía en 4 Fases'}
+                                <ArrowRight className="w-4 h-4" />
+                              </button>
                             </div>
                           )}
                         </div>
                       ))}
                     </div>
-                  </div>
-                )}
 
-                {/* 4-Phase Attack & Defense Anatomy */}
-                {deepExpansion?.attackDefenseAnatomy && (
-                  <div className="rounded-2xl bg-[#161E2E] text-white p-5 sm:p-6 space-y-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <span className="text-xs font-mono uppercase tracking-wider text-[#88CC14] font-bold">
-                          ANATOMÍA COMPLETA DE ATAQUE Y DEFENSA (4 FASES)
-                        </span>
-                        <h3 className="text-base sm:text-lg font-bold text-white mt-0.5">
-                          Cómo ocurre el fallo técnico, cómo se detecta y cómo se erradica
-                        </h3>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                      {deepExpansion.attackDefenseAnatomy.map((phaseItem, pIdx) => {
-                        const colors = [
-                          'text-rose-400',
-                          'text-amber-400',
-                          'text-sky-400',
-                          'text-[#88CC14]',
-                        ];
-                        return (
-                          <div
-                            key={pIdx}
-                            className="p-4 rounded-xl bg-[#0F172A] border border-slate-800 space-y-1.5"
-                          >
-                            <span
-                              className={`text-xs font-mono font-bold block ${
-                                colors[pIdx % colors.length]
-                              }`}
-                            >
-                              {phaseItem.phase.toUpperCase()} · {phaseItem.title}
-                            </span>
-                            <p className="text-xs sm:text-sm text-slate-200 leading-relaxed">
-                              {phaseItem.technicalDetail}
-                            </p>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* Deep Technical Reference Table */}
-                {task1.referenceTable && (
-                  <div className="rounded-xl border border-slate-300 overflow-hidden">
-                    <div className="bg-[#161E2E] px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-                      <span className="text-xs font-mono uppercase tracking-wider text-[#88CC14] font-semibold">
-                        {task1.referenceTable.caption}
-                      </span>
-                      <span className="text-xs font-mono text-slate-400">
-                        Tabla de Referencia Técnica
-                      </span>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left border-collapse">
-                        <thead>
-                          <tr className="bg-slate-100 border-b border-slate-300 text-xs font-mono uppercase text-slate-700">
-                            <th className="py-3 px-4">Concepto / Técnica</th>
-                            <th className="py-3 px-4">Especificación</th>
-                            <th className="py-3 px-4">Impacto en Seguridad</th>
-                            <th className="py-3 px-4">Comando / Uso Práctico</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-200 text-xs sm:text-sm">
-                          {task1.referenceTable.rows.map((row, rIdx) => (
-                            <tr key={rIdx} className="hover:bg-slate-50">
-                              <td className="py-3 px-4 font-mono font-bold text-slate-900">
-                                {row.item}
-                              </td>
-                              <td className="py-3 px-4 font-mono text-slate-700">
-                                {row.specification}
-                              </td>
-                              <td className="py-3 px-4 text-slate-700">{row.securityImpact}</td>
-                              <td className="py-3 px-4 font-mono text-[#1E293B] bg-slate-50/70">
-                                {row.practicalCommandOrUsage}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-
-                {/* Interactive Field Command Cheat Sheet */}
-                {deepExpansion?.commandCheatSheet && deepExpansion.commandCheatSheet.length > 0 && (
-                  <div className="rounded-2xl border border-slate-300 bg-slate-900 text-white overflow-hidden">
-                    <div className="bg-[#161E2E] px-5 py-3.5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <span className="text-xs font-mono uppercase tracking-wider text-[#88CC14] font-bold">
-                          CHEAT SHEET INTERACTIVO DE COMANDOS DE CAMPO
-                        </span>
-                        <p className="text-xs text-slate-400">
-                          Desglose exacto de banderas y cuándo utilizar cada comando en auditorías reales.
+                    {/* "Predice antes de ver" Active Micro-Pause */}
+                    {activeModule.predictionPrompt && (
+                      <div className="p-5 rounded-2xl bg-amber-50/80 border border-amber-200 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-mono uppercase text-amber-900 font-bold flex items-center gap-1.5">
+                            <Lightbulb className="w-4 h-4 text-amber-600" />
+                            PAUSA DE PREDICCIÓN ACTIVA (PIENSA ANTES DE REVELAR)
+                          </span>
+                        </div>
+                        <p className="text-sm font-bold text-slate-900">
+                          {activeModule.predictionPrompt.question}
                         </p>
-                      </div>
-                    </div>
-
-                    <div className="divide-y divide-slate-800">
-                      {deepExpansion.commandCheatSheet.map((item, cIdx) => (
-                        <div
-                          key={cIdx}
-                          className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-slate-800/40 transition-colors"
-                        >
-                          <div className="space-y-1">
-                            <code className="text-xs sm:text-sm font-mono font-bold text-[#88CC14] bg-slate-950 px-2.5 py-1 rounded border border-slate-800 inline-block">
-                              {item.command}
-                            </code>
-                            <p className="text-xs text-slate-200 pt-1">
-                              <strong className="text-sky-400">Desglose de banderas:</strong>{' '}
-                              {item.flagsBreakdown}
-                            </p>
-                            <p className="text-xs text-slate-400">
-                              <strong className="text-slate-300">Cuándo usarlo:</strong>{' '}
-                              {item.whenToUse}
-                            </p>
+                        {!predictionRevealed ? (
+                          <button
+                            type="button"
+                            onClick={() => setPredictionRevealed(true)}
+                            className="px-4 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400 text-amber-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            Ya pensé mi predicción · Comprobar explicación
+                          </button>
+                        ) : (
+                          <div className="p-3.5 rounded-xl bg-white border border-amber-300 text-xs sm:text-sm text-slate-800 leading-relaxed">
+                            <strong className="text-emerald-800">Comprobación:</strong>{' '}
+                            {activeModule.predictionPrompt.reveal}
                           </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
-                          <div className="flex items-center gap-2 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => handleCopyCommand(item.command)}
-                              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono flex items-center gap-1.5 cursor-pointer"
-                            >
-                              <Copy className="w-3.5 h-3.5" />
-                              {copiedCmdToast === item.command ? 'Copiado' : 'Copiar'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleSendCommandToVM(item.command, item.flagsBreakdown)
-                              }
-                              className="px-3 py-1.5 rounded-lg bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-bold text-xs font-mono flex items-center gap-1.5 cursor-pointer"
-                            >
-                              <Terminal className="w-3.5 h-3.5" />
-                              Ejecutar en VM
-                            </button>
+                {/* SUB-TAB 2: 4-PHASE ANATOMY & TECHNICAL REFERENCE TABLE */}
+                {task1SubTab === 'anatomy' && (
+                  <div className="space-y-6">
+                    {deepExpansion?.attackDefenseAnatomy && (
+                      <div className="rounded-2xl bg-[#161E2E] text-white p-5 sm:p-6 space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <span className="text-xs font-mono uppercase tracking-wider text-[#88CC14] font-bold">
+                              ANATOMÍA COMPLETA DE ATAQUE Y DEFENSA (4 FASES)
+                            </span>
+                            <h3 className="text-base sm:text-lg font-bold text-white mt-0.5">
+                              Cómo ocurre el fallo técnico, cómo se detecta y cómo se erradica
+                            </h3>
                           </div>
                         </div>
-                      ))}
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                          {deepExpansion.attackDefenseAnatomy.map((phaseItem, pIdx) => {
+                            const colors = [
+                              'text-rose-400',
+                              'text-amber-400',
+                              'text-sky-400',
+                              'text-[#88CC14]',
+                            ];
+                            return (
+                              <div
+                                key={pIdx}
+                                className="p-4 rounded-xl bg-[#0F172A] border border-slate-800 space-y-1.5"
+                              >
+                                <span
+                                  className={`text-xs font-mono font-bold block ${
+                                    colors[pIdx % colors.length]
+                                  }`}
+                                >
+                                  {phaseItem.phase.toUpperCase()} · {phaseItem.title}
+                                </span>
+                                <p className="text-xs sm:text-sm text-slate-200 leading-relaxed">
+                                  {phaseItem.technicalDetail}
+                                </p>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {task1.referenceTable && (
+                      <div className="rounded-xl border border-slate-300 overflow-hidden">
+                        <div className="bg-[#161E2E] px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+                          <span className="text-xs font-mono uppercase tracking-wider text-[#88CC14] font-semibold">
+                            {task1.referenceTable.caption}
+                          </span>
+                          <span className="text-xs font-mono text-slate-400">
+                            Tabla de Referencia Técnica
+                          </span>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse">
+                            <thead>
+                              <tr className="bg-slate-100 border-b border-slate-300 text-xs font-mono uppercase text-slate-700">
+                                <th className="py-3 px-4">Concepto / Técnica</th>
+                                <th className="py-3 px-4">Especificación</th>
+                                <th className="py-3 px-4">Impacto en Seguridad</th>
+                                <th className="py-3 px-4">Comando / Uso Práctico</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-200 text-xs sm:text-sm">
+                              {task1.referenceTable.rows.map((row, rIdx) => (
+                                <tr key={rIdx} className="hover:bg-slate-50">
+                                  <td className="py-3 px-4 font-mono font-bold text-slate-900">
+                                    {row.item}
+                                  </td>
+                                  <td className="py-3 px-4 font-mono text-slate-700">
+                                    {row.specification}
+                                  </td>
+                                  <td className="py-3 px-4 text-slate-700">{row.securityImpact}</td>
+                                  <td className="py-3 px-4 font-mono text-[#1E293B] bg-slate-50/70">
+                                    {row.practicalCommandOrUsage}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setTask1SubTab('cheatsheet')}
+                        className="px-4 py-2 rounded-xl bg-[#161E2E] text-[#88CC14] text-xs font-mono font-bold flex items-center gap-1.5 cursor-pointer"
+                      >
+                        Ir a Cheat Sheet de Comandos y Glosario
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </div>
                 )}
 
-                {/* Step 1 Verification Question (Strict Validation + 3-Level Hints) */}
+                {/* SUB-TAB 3: CHEAT SHEET & GLOSSARY */}
+                {task1SubTab === 'cheatsheet' && (
+                  <div className="space-y-6">
+                    {deepExpansion?.commandCheatSheet &&
+                      deepExpansion.commandCheatSheet.length > 0 && (
+                        <div className="rounded-2xl border border-slate-300 bg-slate-900 text-white overflow-hidden">
+                          <div className="bg-[#161E2E] px-5 py-3.5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <span className="text-xs font-mono uppercase tracking-wider text-[#88CC14] font-bold">
+                                CHEAT SHEET INTERACTIVO DE COMANDOS DE CAMPO
+                              </span>
+                              <p className="text-xs text-slate-400">
+                                Haz clic en &quot;Ejecutar en AttackBox&quot; para abrir la consola lateral y probar cada comando en vivo.
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="divide-y divide-slate-800">
+                            {deepExpansion.commandCheatSheet.map((item, cIdx) => (
+                              <div
+                                key={cIdx}
+                                className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-slate-800/40 transition-colors"
+                              >
+                                <div className="space-y-1">
+                                  <code className="text-xs sm:text-sm font-mono font-bold text-[#88CC14] bg-slate-950 px-2.5 py-1 rounded border border-slate-800 inline-block">
+                                    {item.command}
+                                  </code>
+                                  <p className="text-xs text-slate-200 pt-1">
+                                    <strong className="text-sky-400">Desglose de banderas:</strong>{' '}
+                                    {item.flagsBreakdown}
+                                  </p>
+                                  <p className="text-xs text-slate-400">
+                                    <strong className="text-slate-300">Cuándo usarlo:</strong>{' '}
+                                    {item.whenToUse}
+                                  </p>
+                                </div>
+
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyCommand(item.command)}
+                                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono flex items-center gap-1.5 cursor-pointer"
+                                  >
+                                    <Copy className="w-3.5 h-3.5" />
+                                    {copiedCmdToast === item.command ? 'Copiado' : 'Copiar'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleSendCommandToVM(item.command, item.flagsBreakdown)
+                                    }
+                                    className="px-3 py-1.5 rounded-lg bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-bold text-xs font-mono flex items-center gap-1.5 cursor-pointer"
+                                  >
+                                    <Terminal className="w-3.5 h-3.5" />
+                                    Ejecutar en AttackBox
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                    {activeModule.glossary && activeModule.glossary.length > 0 && (
+                      <div className="p-4 rounded-xl bg-sky-50/70 border border-sky-200 space-y-2.5">
+                        <div className="flex items-center gap-2 text-xs font-mono uppercase text-sky-900 font-bold">
+                          <BookOpen className="w-4 h-4 text-sky-700" />
+                          GLOSARIO DE TÉRMINOS CLAVE PARA PRINCIPIANTES:
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          {activeModule.glossary.map((g, idx) => (
+                            <div
+                              key={idx}
+                              className="p-3 rounded-lg bg-white border border-sky-100 text-xs space-y-1"
+                            >
+                              <span className="font-mono font-bold text-slate-900">
+                                {g.term}
+                              </span>
+                              <p className="text-slate-600 leading-relaxed">{g.definition}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* TryHackMe-Style "Answer the questions below" Box for Task 1 */}
                 {q1 && (
-                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
-                    <p className="text-xs font-mono uppercase tracking-wider text-slate-600 font-bold">
-                      COMPROBACIÓN DE COMPRENSIÓN DE TASK 1:
-                    </p>
+                  <div className="p-5 rounded-2xl bg-slate-50 border-2 border-slate-200 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-mono uppercase tracking-wider text-[#E11D48] font-bold">
+                        RESPONDE LA PREGUNTA DE TASK 1 PARA MARCARLA COMPLETADA:
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleAskSocraticTutor(
+                            `Necesito una pista socrática para responder esta pregunta de la Task 1: "${q1.questionPrompt}"`,
+                            'socratic'
+                          )
+                        }
+                        className="text-xs font-mono text-[#3F6212] hover:underline font-bold flex items-center gap-1 cursor-pointer"
+                      >
+                        <Bot className="w-3.5 h-3.5" />
+                        Pedir ayuda a la IA con esta pregunta
+                      </button>
+                    </div>
                     <p className="text-sm font-bold text-slate-900">{q1.questionPrompt}</p>
                     <div className="flex flex-col sm:flex-row gap-2">
                       <input
@@ -1305,7 +1582,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                     className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs flex items-center gap-2 cursor-pointer"
                   >
                     <Bot className="w-4 h-4 text-[#3F6212]" />
-                    Pedir analogía al Tutor Socrático
+                    Pedir analogía al Mentor IA
                   </button>
 
                   <button
@@ -1383,9 +1660,25 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                         key={q.id}
                         className="p-5 rounded-xl bg-white border border-slate-200 space-y-3 shadow-2xs"
                       >
-                        <p className="text-sm sm:text-base font-bold text-slate-900">
-                          Pregunta {qIdx + 1} de {activeModule.activeRecallQuestions.length}: {q.question}
-                        </p>
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="text-sm sm:text-base font-bold text-slate-900">
+                            Pregunta {qIdx + 1} de {activeModule.activeRecallQuestions.length}: {q.question}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleAskSocraticTutor(
+                                `Sin darme la letra correcta, explícame el concepto detrás de esta pregunta de Active Recall: "${q.question}"`,
+                                'simplify_for_beginner'
+                              )
+                            }
+                            className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-xs font-mono text-[#3F6212] font-bold shrink-0 cursor-pointer flex items-center gap-1"
+                          >
+                            <Sparkles className="w-3 h-3" />
+                            Pista IA
+                          </button>
+                        </div>
+
                         <div className="space-y-2">
                           {q.options.map((opt, oIdx) => {
                             const isChosen = selected === oIdx;
@@ -1495,7 +1788,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                       }}
                       className="px-6 py-3 rounded-xl bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-bold text-sm flex items-center gap-2 shadow-sm cursor-pointer"
                     >
-                      Ir a Task 3: Laboratorio en Pantalla Dividida (VM)
+                      Ir a Task 3: Laboratorio en Pantalla Dividida (AttackBox)
                       <Terminal className="w-4 h-4" />
                     </button>
                   </div>
@@ -1505,23 +1798,34 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
           )}
 
           {/* =====================================================================
-              STEP 3: EJERCICIO PRÁCTICO EN VM (GUÍA IZQUIERDA + ESTACIÓN DERECHA)
+              STEP 3: EJERCICIO PRÁCTICO EN VM (GUÍA IZQUIERDA + ATTACKBOX DERECHA)
              ===================================================================== */}
           {activeStep === 3 && task3 && (
             <div className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
               <div className="bg-[#1C2538] px-6 py-4 text-white flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2.5">
                   <span className="px-2.5 py-1 rounded text-xs font-mono font-bold bg-[#88CC14] text-slate-950">
-                    Task 3 de 5 · Práctica Deliberada
+                    Task 3 de 5 · Laboratorio AttackBox
                   </span>
                   <h2 className="text-base sm:text-lg font-bold">{task3.title}</h2>
                 </div>
                 <span className="px-2.5 py-1 rounded text-xs font-mono bg-emerald-500/20 text-[#88CC14] border border-[#88CC14]/40">
-                  Nodo Activo: {vmNode.hostname} ({vmNode.ip})
+                  AttackBox Derecha Activa: {vmNode.hostname} ({vmNode.ip})
                 </span>
               </div>
 
               <div className="p-6 sm:p-8 space-y-6">
+                {/* Beginner Orientation Banner for the Lab */}
+                <div className="p-4 rounded-xl bg-sky-50 border border-sky-200 text-xs sm:text-sm text-sky-950 space-y-1.5">
+                  <p className="font-bold flex items-center gap-1.5">
+                    <Terminal className="w-4 h-4 text-sky-700" />
+                    ¿Cómo resolver este laboratorio en la AttackBox (a tu derecha)?
+                  </p>
+                  <p className="text-slate-700 leading-relaxed">
+                    En la ventana negra de la derecha tienes los <strong>Pasos Guiados (Paso 1, Paso 2, Paso 3)</strong>. Puedes hacer clic en <strong>&quot;Ejecutar Paso&quot;</strong> o escribir los comandos directamente en la consola hasta obtener la bandera <code className="font-mono font-bold">FLAG&#123;...&#125;</code>. Si algo falla, pulsa <strong>&quot;Explicar Consola con IA&quot;</strong>.
+                  </p>
+                </div>
+
                 <div className="space-y-3">
                   {task3.readingParagraphs.map((p, idx) => (
                     <p key={idx} className="text-sm sm:text-base text-slate-800 leading-relaxed">
@@ -1555,7 +1859,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                             onClick={() => handleRunVMCommand(c.command, c.flagsBreakdown)}
                             className="px-2.5 py-1 rounded bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-mono font-bold text-[11px] shrink-0 cursor-pointer"
                           >
-                            ▶ Ejecutar en VM
+                            ▶ Enviar a AttackBox
                           </button>
                         </div>
                       ))}
@@ -1565,10 +1869,25 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
 
                 {/* Verify Task 3 Flag Question */}
                 {q3 && (
-                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
-                    <p className="text-xs font-mono uppercase tracking-wider text-slate-600 font-bold">
-                      VERIFICACIÓN ESTRICTA DE BANDERA CAPTURADA EN LA VM:
-                    </p>
+                  <div className="p-5 rounded-2xl bg-slate-50 border-2 border-slate-200 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-mono uppercase tracking-wider text-[#E11D48] font-bold">
+                        VERIFICACIÓN DE BANDERA CAPTURADA EN LA ATTACKBOX:
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleAskSocraticTutor(
+                            `Estoy en el laboratorio de la Task 3 de "${activeModule.title}". ¿Qué pasos debo seguir en la terminal para encontrar la bandera?`,
+                            'socratic'
+                          )
+                        }
+                        className="text-xs font-mono text-[#3F6212] hover:underline font-bold flex items-center gap-1 cursor-pointer"
+                      >
+                        <Bot className="w-3.5 h-3.5" />
+                        ¿Atascado? Pedir guía a la IA
+                      </button>
+                    </div>
                     <p className="text-sm font-bold text-slate-900">{q3.questionPrompt}</p>
                     <div className="flex flex-col sm:flex-row gap-2">
                       <input
@@ -1668,16 +1987,31 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                 {/* Side-by-Side Vulnerable vs. Hardened Code / Config Comparison */}
                 {deepExpansion?.vulnerableVsSecureCode && (
                   <div className="rounded-2xl bg-[#0F172A] border border-slate-800 p-5 text-white space-y-4">
-                    <div className="flex items-center gap-2">
-                      <Code2 className="w-5 h-5 text-[#88CC14]" />
-                      <div>
-                        <span className="text-xs font-mono uppercase text-[#88CC14] font-bold block">
-                          AUDITORÍA COMPARATIVA DE CÓDIGO / CONFIGURACIÓN
-                        </span>
-                        <h3 className="text-sm sm:text-base font-bold text-white">
-                          {deepExpansion.vulnerableVsSecureCode.title}
-                        </h3>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Code2 className="w-5 h-5 text-[#88CC14]" />
+                        <div>
+                          <span className="text-xs font-mono uppercase text-[#88CC14] font-bold block">
+                            AUDITORÍA COMPARATIVA DE CÓDIGO / CONFIGURACIÓN
+                          </span>
+                          <h3 className="text-sm sm:text-base font-bold text-white">
+                            {deepExpansion.vulnerableVsSecureCode.title}
+                          </h3>
+                        </div>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleAskSocraticTutor(
+                            `Explícame línea por línea la diferencia entre el código vulnerable y el código seguro en "${deepExpansion.vulnerableVsSecureCode.title}".`,
+                            'simplify_for_beginner'
+                          )
+                        }
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[#88CC14] text-xs font-mono font-bold flex items-center gap-1 cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        Explicar código con IA
+                      </button>
                     </div>
 
                     <div className="grid grid-cols-1 gap-4">
@@ -1711,8 +2045,8 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                 )}
 
                 {q4 && (
-                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
-                    <p className="text-xs font-mono uppercase tracking-wider text-slate-600 font-bold">
+                  <div className="p-5 rounded-2xl bg-slate-50 border-2 border-slate-200 space-y-3">
+                    <p className="text-xs font-mono uppercase tracking-wider text-[#E11D48] font-bold">
                       VERIFICACIÓN DEL COMANDO O PARÁMETRO DE REMEDIACIÓN:
                     </p>
                     <p className="text-sm font-bold text-slate-900">{q4.questionPrompt}</p>
@@ -1945,7 +2279,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                         <Sparkles className="w-4 h-4" />
                         {aiEvaluating
                           ? 'Evaluando Autoexplicación...'
-                          : 'Evaluar mi Autoexplicación (Rúbrica Causal + Tutor)'}
+                          : 'Evaluar mi Autoexplicación (Rúbrica Causal + IA)'}
                       </button>
                     </div>
 
@@ -1978,8 +2312,8 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
                           </p>
                           <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
                             {aiEvaluationSource === 'ai'
-                              ? 'Fuente: Gemini 3.5 Flash'
-                              : 'Fuente: Guía Socrática Local'}
+                              ? 'Fuente: Gemini Flash'
+                              : 'Fuente: Motor Adaptativo Local'}
                           </span>
                         </div>
                         <div className="whitespace-pre-wrap leading-relaxed text-slate-200">
@@ -2342,7 +2676,7 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
           )}
         </div>
 
-        {/* RIGHT PANE: Sticky Interactive Linux VM + Python/Bash Static Analyzer (Split-Screen Workbench) */}
+        {/* RIGHT PANE: Sticky Interactive Linux AttackBox VM + Python/Bash Static Analyzer */}
         {showSideBySideVM && (
           <div className="lg:col-span-6 lg:sticky lg:top-20 space-y-4">
             <ExerciseVMWorkbench
@@ -2359,6 +2693,14 @@ export const CurriculumView: React.FC<CurriculumViewProps> = ({
               lastExecutedExplanation={lastExecutedExplanation}
               onRunCommand={handleRunVMCommand}
               onResetNode={() => initVmBanner(vmNode)}
+              onExplainTerminalWithAI={(lastCmd, lastOut) => {
+                handleAskSocraticTutor(
+                  `Acabo de ejecutar "${lastCmd}" en la AttackBox Linux. Explícame qué significa la salida de la consola y qué comando debería probar a continuación.`,
+                  'explain_terminal_command',
+                  lastCmd,
+                  lastOut
+                );
+              }}
             />
           </div>
         )}

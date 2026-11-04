@@ -11,6 +11,11 @@ import {
   BookOpen,
   Terminal,
   ShieldCheck,
+  Sparkles,
+  Bot,
+  Send,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { type CurriculumModule } from '../data/curriculumData';
 import {
@@ -24,6 +29,12 @@ import {
 } from '../utils/fsrs';
 import { MODULE_DEEP_EXTRAS } from '../data/roomTasksData';
 import { MODULE_DEEP_EXPANSION } from '../data/deepContentExpansion';
+import {
+  LEARNING_STYLE_META,
+  buildStudentDiagnosticSummary,
+  askAIMentor,
+  type LearningStyle,
+} from '../utils/aiMentorEngine';
 
 export interface EngineeringNote {
   id: string;
@@ -41,6 +52,8 @@ interface StudentDashboardProps {
   modules: CurriculumModule[];
   progressMap: Record<string, ModuleProgress>;
   cards: FSRSCard[];
+  learningStyle: LearningStyle;
+  onChangeLearningStyle: (style: LearningStyle) => void;
   onOpenModule: (moduleId: string) => void;
   onRateCard: (cardId: string, rating: Rating) => void;
   onOpenPlacementTest: () => void;
@@ -90,6 +103,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   modules,
   progressMap,
   cards,
+  learningStyle,
+  onChangeLearningStyle,
   onOpenModule,
   onRateCard,
   onOpenPlacementTest,
@@ -98,6 +113,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   const [selectedStageFilter, setSelectedStageFilter] = useState<string>('all');
   const [showInlineReview, setShowInlineReview] = useState(false);
   const [showBadgesDrawer, setShowBadgesDrawer] = useState(false);
+  const [expandedRoomLessons, setExpandedRoomLessons] = useState<Record<string, boolean>>({
+    'mod-00': true,
+  });
+
+  // Dashboard AI Copilot state
+  const [showAiPlanner, setShowAiPlanner] = useState(false);
+  const [aiQuery, setAiQuery] = useState('');
+  const [aiReply, setAiReply] = useState<string | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+
   const [frozenQueueIds, setFrozenQueueIds] = useState<string[]>([]);
   const [reviewIndex, setReviewIndex] = useState(0);
   const [writtenAttempt, setWrittenAttempt] = useState('');
@@ -160,6 +185,35 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
   const currentStepModule =
     modules.find((m) => getModuleMasteryLevel(m.id) < 2) ?? modules[0];
 
+  const diagnostic = buildStudentDiagnosticSummary(
+    modules,
+    progressMap,
+    cards,
+    learningStyle
+  );
+
+  const handleAskDashboardAI = async (
+    customPrompt?: string,
+    mode: 'socratic' | 'simplify_for_beginner' | 'personalized_study_plan' = 'personalized_study_plan'
+  ) => {
+    const q = (customPrompt ?? aiQuery).trim();
+    if (!q || aiLoading) return;
+    setShowAiPlanner(true);
+    setAiLoading(true);
+    try {
+      const res = await askAIMentor({
+        question: q,
+        learningStyle,
+        activeModule: currentStepModule,
+        mode,
+      });
+      setAiReply(res.reply);
+      if (!customPrompt) setAiQuery('');
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
   const handleInlineRate = (rating: Rating) => {
     if (!activeReviewCard) return;
     onRateCard(activeReviewCard.id, rating);
@@ -174,17 +228,17 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
       : LEARNING_PATHS.filter((p) => p.id === selectedStageFilter);
 
   return (
-    <div className="max-w-6xl mx-auto space-y-8">
-      {/* TryHackMe-Style Personal Command & Current Room Banner */}
-      <div className="bg-[#161E2E] border border-slate-800 rounded-2xl p-6 sm:p-8 text-white shadow-lg">
+    <div className="max-w-6xl mx-auto space-y-6">
+      {/* 1. TryHackMe-Style Personal Command & Current Room Banner */}
+      <div className="bg-[#161E2E] border border-slate-800 rounded-2xl p-6 sm:p-7 text-white shadow-lg">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
           <div className="lg:col-span-8 space-y-4">
-            <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
+            <div className="flex flex-wrap items-center gap-2.5 text-xs font-mono">
               <span className="px-2.5 py-1 rounded-md bg-[#88CC14] text-slate-950 font-bold uppercase tracking-wider">
                 RUTA GUIADA · DE CERO A PROFESIONAL
               </span>
               <span className="text-slate-300">
-                Sala Actual: <strong className="text-white">Sala {currentStepModule.number}</strong> · {completedModulesCount} de {totalRooms} salas dominadas
+                Tu Sala Actual: <strong className="text-white">Sala {currentStepModule.number}</strong> · {completedModulesCount} de {totalRooms} salas dominadas
               </span>
             </div>
 
@@ -192,8 +246,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
                 {currentStepModule.number} · {currentStepModule.title}
               </h1>
-              <p className="text-sm text-slate-300 mt-2 leading-relaxed max-w-2xl">
-                Cada sala integra 6 lecciones técnicas profundas, anatomía de ataque y defensa en 4 fases, hoja de comandos de campo (Cheat Sheet), laboratorio Linux en pantalla dividida, auditoría de código vulnerable vs. seguro y repetición espaciada DSR.
+              <p className="text-sm text-slate-300 mt-1.5 leading-relaxed max-w-2xl">
+                {currentStepModule.summary}
               </p>
             </div>
 
@@ -204,19 +258,37 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                 className="px-5 py-3 rounded-xl bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-bold text-sm transition-colors flex items-center gap-2 shadow-sm cursor-pointer"
               >
                 <Play className="w-4 h-4 fill-current" />
-                Continuar en Sala {currentStepModule.number}
+                Entrar a Sala {currentStepModule.number} (Paso a Paso)
                 <ArrowRight className="w-4 h-4" />
               </button>
 
               <button
                 type="button"
+                onClick={() => {
+                  if (!showAiPlanner && !aiReply) {
+                    handleAskDashboardAI(
+                      `Soy estudiante en modo ${LEARNING_STYLE_META[learningStyle].label}. ¿Cómo debo abordar la Sala ${currentStepModule.number} hoy paso a paso?`,
+                      'personalized_study_plan'
+                    );
+                  } else {
+                    setShowAiPlanner((prev) => !prev);
+                  }
+                }}
+                className="px-4 py-3 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-400/40 text-xs sm:text-sm font-bold transition-colors flex items-center gap-2 cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4 text-sky-400" />
+                Plan y Mentor IA Personalizado
+              </button>
+
+              <button
+                type="button"
                 onClick={handleToggleInlineReview}
-                className="px-4 py-3 rounded-xl bg-[#1E293B] hover:bg-slate-700 text-white border border-slate-700 text-xs sm:text-sm font-semibold transition-colors flex items-center gap-2 cursor-pointer"
+                className="px-3.5 py-3 rounded-xl bg-[#1E293B] hover:bg-slate-700 text-white border border-slate-700 text-xs font-semibold transition-colors flex items-center gap-2 cursor-pointer"
               >
                 <Brain className="w-4 h-4 text-[#88CC14]" />
                 {showInlineReview
-                  ? 'Ocultar Repaso Diario'
-                  : `Repaso Espaciado (${dueCards.length} vencidas)`}
+                  ? 'Ocultar Repaso'
+                  : `Repaso DSR (${dueCards.length})`}
               </button>
 
               <button
@@ -225,7 +297,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                 className="px-3.5 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 text-xs font-mono font-semibold transition-colors flex items-center gap-1.5 cursor-pointer"
               >
                 <Award className="w-4 h-4 text-[#88CC14]" />
-                Insignias Personales ({completedModulesCount}/{totalRooms})
+                Insignias ({completedModulesCount}/{totalRooms})
               </button>
 
               <button
@@ -243,7 +315,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                 className="px-3.5 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 text-xs font-mono font-semibold transition-colors flex items-center gap-1.5 cursor-pointer"
               >
                 <Database className="w-4 h-4 text-[#88CC14]" />
-                Mazo ({cards.length}) y Backup
+                Mazo ({cards.length})
               </button>
             </div>
           </div>
@@ -252,7 +324,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
           <div className="lg:col-span-4 bg-[#0F172A] border border-slate-800 rounded-xl p-5 space-y-4">
             <div className="flex items-center justify-between">
               <span className="text-xs font-mono uppercase text-slate-400">
-                DOMINIO PERSONAL ACUMULADO
+                PROGRESO EN LA CARRERA
               </span>
               <span className="text-sm font-mono font-bold text-[#88CC14] tabular-nums">
                 {completedModulesCount} / {totalRooms} Salas ({progressPercentage}%)
@@ -296,14 +368,162 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                 </p>
               </div>
             </div>
-
-            <p className="text-[11px] text-slate-400 leading-relaxed">
-              Sistema de progreso individual: cada sala incluye 6 lecciones completas, Cheat Sheet de comandos, laboratorio Linux interactivo y repaso DSR.
-            </p>
           </div>
         </div>
 
-        {/* Personal Competency Badges Drawer (No XP Table — Pure Technical Certifications) */}
+        {/* 2. AI Personalization Profile Bar (Always visible so the student can customize how the platform teaches them) */}
+        <div className="mt-5 pt-5 border-t border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-xs font-mono text-[#88CC14] font-bold">
+              <Bot className="w-4 h-4" />
+              <span>PERSONALIZACIÓN DE TU IA Y MÉTODO DE EXPLICACIÓN:</span>
+            </div>
+            <p className="text-xs text-slate-300">
+              {diagnostic.advice}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5 shrink-0 bg-[#0F172A] p-1.5 rounded-xl border border-slate-800">
+            {(Object.keys(LEARNING_STYLE_META) as LearningStyle[]).map((styleKey) => {
+              const meta = LEARNING_STYLE_META[styleKey];
+              const isSelected = learningStyle === styleKey;
+              return (
+                <button
+                  key={styleKey}
+                  type="button"
+                  onClick={() => onChangeLearningStyle(styleKey)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-mono transition-all cursor-pointer ${
+                    isSelected
+                      ? 'bg-[#88CC14] text-slate-950 font-bold shadow-2xs'
+                      : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
+                  }`}
+                  title={meta.description}
+                >
+                  {meta.shortLabel}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Interactive AI Study Planner & Copilot Drawer inside Dashboard */}
+        {showAiPlanner && (
+          <div className="mt-5 pt-5 border-t border-slate-800 space-y-4">
+            <div className="bg-[#0F172A] border border-sky-500/40 rounded-xl p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-[#88CC14]" />
+                  <h2 className="text-sm font-bold text-white">
+                    Copiloto IA de Estudio Personalizado ({LEARNING_STYLE_META[learningStyle].badge})
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAiPlanner(false)}
+                  className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 cursor-pointer"
+                >
+                  Ocultar Copiloto
+                </button>
+              </div>
+
+              {aiLoading ? (
+                <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono text-[#88CC14]">
+                  Analizando tu progreso y preparando tu guía personalizada...
+                </div>
+              ) : (
+                aiReply && (
+                  <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 text-xs sm:text-sm text-slate-200 leading-relaxed space-y-1.5">
+                    {aiReply.split('\n').map((line, idx) => {
+                      const trimmed = line.trim();
+                      if (!trimmed) return <div key={idx} className="h-1" />;
+                      if (trimmed.startsWith('### ')) {
+                        return (
+                          <h4
+                            key={idx}
+                            className="text-xs sm:text-sm font-bold text-[#88CC14] font-mono pt-1"
+                          >
+                            {trimmed.replace(/^###\s+/, '')}
+                          </h4>
+                        );
+                      }
+                      const parts = trimmed.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+                      return (
+                        <p key={idx}>
+                          {parts.map((part, i) => {
+                            if (part.startsWith('**') && part.endsWith('**')) {
+                              return (
+                                <strong key={i} className="font-bold text-white">
+                                  {part.slice(2, -2)}
+                                </strong>
+                              );
+                            }
+                            if (part.startsWith('`') && part.endsWith('`')) {
+                              return (
+                                <code
+                                  key={i}
+                                  className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-[#88CC14] font-mono text-xs"
+                                >
+                                  {part.slice(1, -1)}
+                                </code>
+                              );
+                            }
+                            return part;
+                          })}
+                        </p>
+                      );
+                    })}
+                  </div>
+                )
+              )}
+
+              <div className="flex flex-wrap gap-2">
+                {[
+                  `Explícame de qué trata la Sala ${currentStepModule.number} con una analogía sencilla`,
+                  `¿Qué comandos de Linux practicaré en la Sala ${currentStepModule.number}?`,
+                  '¿Cómo funciona el método de estudio de las 5 Tasks en cada sala?',
+                ].map((chip, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() =>
+                      handleAskDashboardAI(
+                        chip,
+                        idx === 0 ? 'simplify_for_beginner' : 'socratic'
+                      )
+                    }
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-sky-300 cursor-pointer"
+                  >
+                    ✨ {chip}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="text"
+                  value={aiQuery}
+                  onChange={(e) => setAiQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleAskDashboardAI( undefined, 'socratic');
+                  }}
+                  placeholder="Pregúntale a tu Copiloto IA por dónde empezar o pide que te explique un concepto..."
+                  className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs sm:text-sm text-white focus:outline-none focus:border-[#88CC14]"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleAskDashboardAI(undefined, 'socratic')}
+                  disabled={aiLoading}
+                  className="px-4 py-2.5 rounded-xl bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Consultar IA
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Personal Competency Badges Drawer */}
         {showBadgesDrawer && (
           <div className="mt-6 pt-6 border-t border-slate-800 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -473,7 +693,50 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
         )}
       </div>
 
-      {/* Stage Filter Navigation Bar */}
+      {/* 3. How the Platform Works (3-Step Quick Guide for Beginners) */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="bg-white border border-slate-200 rounded-xl p-4 flex items-start gap-3 shadow-2xs">
+          <div className="w-8 h-8 rounded-lg bg-[#161E2E] text-[#88CC14] font-mono text-xs font-bold flex items-center justify-center shrink-0">
+            01
+          </div>
+          <div>
+            <h3 className="text-xs font-bold uppercase font-mono text-slate-900">
+              1. Lecciones Paso a Paso
+            </h3>
+            <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+              Cada sala divide la teoría en 6 lecciones digeribles con glosario, pausas activas y explicaciones IA adaptadas a tu nivel.
+            </p>
+          </div>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4 flex items-start gap-3 shadow-2xs">
+          <div className="w-8 h-8 rounded-lg bg-[#161E2E] text-sky-400 font-mono text-xs font-bold flex items-center justify-center shrink-0">
+            02
+          </div>
+          <div>
+            <h3 className="text-xs font-bold uppercase font-mono text-slate-900">
+              2. AttackBox en Pantalla Dividida
+            </h3>
+            <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+              Practica los comandos de Linux, auditoría de código y captura de banderas sin salir de la lección, con ayuda IA en vivo en la consola.
+            </p>
+          </div>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4 flex items-start gap-3 shadow-2xs">
+          <div className="w-8 h-8 rounded-lg bg-[#161E2E] text-amber-400 font-mono text-xs font-bold flex items-center justify-center shrink-0">
+            03
+          </div>
+          <div>
+            <h3 className="text-xs font-bold uppercase font-mono text-slate-900">
+              3. Retención Científica DSR
+            </h3>
+            <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+              Tus errores en los cuestionarios generan tarjetas de memoria espaciada automáticamente para que nunca olvides lo aprendido.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* 4. Stage Filter Navigation Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-slate-200 rounded-xl p-3 shadow-2xs">
         <div className="flex flex-wrap items-center gap-1.5">
           {[
@@ -498,11 +761,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
           ))}
         </div>
         <span className="text-xs font-mono text-slate-500 px-2">
-          6 Lecciones + Cheat Sheet + Laboratorio VM por Sala
+          Haz clic en cualquier sala para iniciar sus 5 Tasks interactivas
         </span>
       </div>
 
-      {/* Progressive Learning Paths Roadmap (Connected Visual Timeline) */}
+      {/* 5. Progressive Learning Paths Roadmap (Connected Visual Timeline) */}
       <div className="space-y-8">
         {filteredPaths.map((path) => {
           const pathModules = modules.filter((m) => path.moduleIds.includes(m.id));
@@ -545,7 +808,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
 
               {/* Connected Timeline Nodes inside this Path */}
               <div className="p-6 sm:p-8">
-                <div className="relative border-l-2 border-slate-200 ml-5 sm:ml-6 pl-6 sm:pl-8 space-y-6">
+                <div className="relative border-l-2 border-slate-200 ml-5 sm:ml-6 pl-6 sm:pl-8 space-y-5">
                   {pathModules.map((mod) => {
                     const masteryLevel = getModuleMasteryLevel(mod.id);
                     const masteryInfo = MASTERY_LABELS[masteryLevel];
@@ -556,22 +819,23 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                     const totalLessonsCount =
                       mod.theorySections.length +
                       (deepExp?.extendedSubModules?.length ?? 0);
+                    const isSyllabusOpen = Boolean(expandedRoomLessons[mod.id]);
 
                     return (
                       <div
                         key={mod.id}
-                        onClick={() => onOpenModule(mod.id)}
-                        className={`relative rounded-2xl border p-5 transition-all cursor-pointer group ${
+                        className={`relative rounded-2xl border p-5 transition-all ${
                           isCurrentRecommended
                             ? 'bg-emerald-50/40 border-[#88CC14] shadow-xs'
                             : isCompleted
                               ? 'bg-white border-emerald-300/80 hover:border-emerald-400'
-                              : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/50'
+                              : 'bg-white border-slate-200 hover:border-slate-300'
                         }`}
                       >
                         {/* Connected Timeline Circle Node */}
                         <div
-                          className={`absolute -left-[43px] sm:-left-[51px] top-6 w-9 h-9 rounded-xl font-mono font-bold text-xs flex items-center justify-center shadow-2xs transition-transform group-hover:scale-105 ${
+                          onClick={() => onOpenModule(mod.id)}
+                          className={`absolute -left-[43px] sm:-left-[51px] top-6 w-9 h-9 rounded-xl font-mono font-bold text-xs flex items-center justify-center shadow-2xs cursor-pointer ${
                             isCompleted
                               ? 'bg-[#88CC14] text-slate-950'
                               : isCurrentRecommended
@@ -586,9 +850,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                           )}
                         </div>
 
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-5">
-                          <div className="space-y-2">
-                            {/* Clean Zero-Pill Metadata Line */}
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                          <div className="space-y-2 flex-1">
+                            {/* Clean Metadata Line */}
                             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-mono text-slate-500">
                               <span className="font-bold text-slate-800">
                                 SALA {mod.number}
@@ -599,7 +863,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                               <span>{mod.estimatedHours}h</span>
                               <span>·</span>
                               <span className="text-emerald-800 font-semibold">
-                                {totalLessonsCount} Lecciones + Cheat Sheet + Lab VM
+                                {totalLessonsCount} Lecciones + Lab AttackBox
                               </span>
                               <span>·</span>
                               <span className="text-slate-700 font-semibold">
@@ -609,13 +873,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                                 <>
                                   <span>·</span>
                                   <span className="text-[#E11D48] font-bold">
-                                    ★ PASO ACTUAL RECOMENDADO
+                                    ★ SALA ACTUAL RECOMENDADA
                                   </span>
                                 </>
                               )}
                             </div>
 
-                            <h3 className="text-base sm:text-lg font-bold text-slate-900 group-hover:text-[#3F6212] transition-colors">
+                            <h3
+                              onClick={() => onOpenModule(mod.id)}
+                              className="text-base sm:text-lg font-bold text-slate-900 hover:text-[#3F6212] transition-colors cursor-pointer"
+                            >
                               {mod.title}
                             </h3>
 
@@ -623,31 +890,63 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                               {mod.summary || extra?.deepIntroParagraphs?.[0]}
                             </p>
 
-                            {/* Preview of the 6 lessons included inside the room */}
-                            {deepExp && (
-                              <div className="pt-1 text-xs text-slate-500 font-mono flex flex-wrap items-center gap-x-3 gap-y-1">
-                                <span className="text-slate-700 font-semibold">
-                                  Temario ampliado ({totalLessonsCount} subtemas):
-                                </span>
-                                {deepExp.extendedSubModules.slice(0, 3).map((sub) => (
-                                  <span key={sub.id} className="text-slate-600">
-                                    • {sub.title.replace(/^\d+\.\s*/, '')}
-                                  </span>
-                                ))}
-                                <span className="text-emerald-800 font-semibold">
-                                  + Anatomía 4 Fases y Auditoría de Código
-                                </span>
-                              </div>
-                            )}
+                            {/* Collapsible 6-Lesson Syllabus Toggle to keep the card clean */}
+                            <div className="pt-1">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedRoomLessons((prev) => ({
+                                    ...prev,
+                                    [mod.id]: !prev[mod.id],
+                                  }))
+                                }
+                                className="text-xs font-mono text-slate-600 hover:text-slate-900 font-semibold inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                {isSyllabusOpen ? (
+                                  <>
+                                    <ChevronUp className="w-3.5 h-3.5 text-[#3F6212]" />
+                                    Ocultar desglose de las {totalLessonsCount} lecciones
+                                  </>
+                                ) : (
+                                  <>
+                                    <ChevronDown className="w-3.5 h-3.5 text-[#3F6212]" />
+                                    Ver el temario de las {totalLessonsCount} lecciones y laboratorio de esta sala
+                                  </>
+                                )}
+                              </button>
+
+                              {isSyllabusOpen && deepExp && (
+                                <div className="mt-2.5 p-3.5 rounded-xl bg-slate-50 border border-slate-200 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                                  {mod.theorySections.map((sec, sIdx) => (
+                                    <div key={sIdx} className="flex items-start gap-1.5 text-slate-700">
+                                      <span className="font-mono font-bold text-[#3F6212]">
+                                        L{sIdx + 1}:
+                                      </span>
+                                      <span>{sec.heading}</span>
+                                    </div>
+                                  ))}
+                                  {deepExp.extendedSubModules.map((sub, eIdx) => (
+                                    <div key={sub.id} className="flex items-start gap-1.5 text-slate-700">
+                                      <span className="font-mono font-bold text-[#3F6212]">
+                                        L{mod.theorySections.length + eIdx + 1}:
+                                      </span>
+                                      <span>{sub.title.replace(/^\d+\.\s*/, '')}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
                           </div>
 
                           {/* Action CTA */}
                           <div className="shrink-0 self-start md:self-center">
-                            <span
-                              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs sm:text-sm transition-colors whitespace-nowrap ${
+                            <button
+                              type="button"
+                              onClick={() => onOpenModule(mod.id)}
+                              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs sm:text-sm transition-colors whitespace-nowrap cursor-pointer ${
                                 isCurrentRecommended
                                   ? 'bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 shadow-xs'
-                                  : 'bg-[#161E2E] group-hover:bg-slate-800 text-white'
+                                  : 'bg-[#161E2E] hover:bg-slate-800 text-white'
                               }`}
                             >
                               {isCompleted
@@ -656,7 +955,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
                                   ? 'Continuar Aquí'
                                   : 'Entrar a la Sala'}
                               <ArrowRight className="w-4 h-4" />
-                            </span>
+                            </button>
                           </div>
                         </div>
                       </div>

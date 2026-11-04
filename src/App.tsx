@@ -29,6 +29,10 @@ import {
 import { StudentDashboard, type EngineeringNote } from './components/StudentDashboard';
 import { CurriculumView } from './components/CurriculumView';
 import { PlacementTestModal, DataAndDeckModal } from './components/PlacementTestModal';
+import {
+  LEARNING_STYLE_META,
+  type LearningStyle,
+} from './utils/aiMentorEngine';
 
 type ViewMode = 'path' | 'module';
 
@@ -37,6 +41,30 @@ export default function App() {
   const [selectedModuleId, setSelectedModuleId] = useState<string>('mod-00');
   const [showPlacementModal, setShowPlacementModal] = useState(false);
   const [showDataModal, setShowDataModal] = useState(false);
+  const [learningStyle, setLearningStyle] = useState<LearningStyle>(() => {
+    try {
+      const saved = localStorage.getItem('aegis_learning_style_v1');
+      if (
+        saved === 'visual_analogies' ||
+        saved === 'step_by_step_commands' ||
+        saved === 'deep_technical'
+      ) {
+        return saved;
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return 'visual_analogies';
+  });
+
+  const handleChangeLearningStyle = (style: LearningStyle) => {
+    setLearningStyle(style);
+    try {
+      localStorage.setItem('aegis_learning_style_v1', style);
+    } catch {
+      // ignore storage errors
+    }
+  };
 
   const [modules] = useState<CurriculumModule[]>(CURRICULUM_MODULES);
 
@@ -213,7 +241,7 @@ export default function App() {
     <div className="min-h-screen flex flex-col bg-[#F3F5F8] text-slate-900 selection:bg-[#88CC14]/30">
       {/* Top Navigation Bar (Clean 3-Zone Contract) */}
       <header className="sticky top-0 z-40 h-16 bg-[#151C2B] border-b border-slate-800 shadow-md">
-        <div className="max-w-7xl mx-auto h-full px-4 sm:px-6 flex items-center justify-between gap-4">
+        <div className="max-w-[1600px] mx-auto h-full px-4 sm:px-6 flex items-center justify-between gap-4">
           {/* Zone 1: Brand Identity */}
           <button
             type="button"
@@ -268,6 +296,11 @@ export default function App() {
                 </button>
               </div>
             )}
+
+            <div className="hidden lg:flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-1 text-xs font-mono text-slate-300">
+              <span className="text-[#88CC14] font-bold">IA:</span>
+              <span>{LEARNING_STYLE_META[learningStyle].shortLabel}</span>
+            </div>
           </nav>
 
           {/* Zone 3: Primary Action CTA */}
@@ -300,6 +333,8 @@ export default function App() {
             modules={modules}
             progressMap={progressMap}
             cards={cards}
+            learningStyle={learningStyle}
+            onChangeLearningStyle={handleChangeLearningStyle}
             onOpenModule={handleOpenModule}
             onRateCard={handleRateCard}
             onOpenPlacementTest={() => setShowPlacementModal(true)}
@@ -321,6 +356,8 @@ export default function App() {
             onCreateFlashcardFromModule={handleCreateFlashcardFromModule}
             moduleNotes={activeModuleNotes}
             onSaveModuleNote={handleSaveModuleNote}
+            learningStyle={learningStyle}
+            onChangeLearningStyle={handleChangeLearningStyle}
           />
         )}
       </main>

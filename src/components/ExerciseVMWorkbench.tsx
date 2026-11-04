@@ -7,11 +7,15 @@ import {
   Eye,
   ShieldAlert,
   CheckCircle2,
+  Copy,
+  Sparkles,
+  HelpCircle,
+  FolderOpen,
 } from 'lucide-react';
 import {
   runSecurityScriptSandbox,
   resetVMNodeState,
-  type VMNodeState,
+  type VMNode,
 } from '../utils/vmEngine';
 
 export interface VMLogLine {
@@ -28,7 +32,7 @@ interface CommandBlockItem {
 interface ExerciseVMWorkbenchProps {
   scaffoldingLevel: 'Guiado Paso a Paso' | 'Andamiaje con Pistas' | 'Resolución Autónoma';
   commandBlocks: CommandBlockItem[];
-  vmNode: VMNodeState;
+  vmNode: VMNode;
   vmUser: string;
   vmCwd: string;
   vmInput: string;
@@ -39,7 +43,15 @@ interface ExerciseVMWorkbenchProps {
   lastExecutedExplanation: string | null;
   onRunCommand: (rawCmd?: string, stepExplanation?: string) => void;
   onResetNode: () => void;
+  onExplainTerminalWithAI?: (lastCommand: string, lastOutput: string) => void;
 }
+
+const BEGINNER_QUICK_COMMANDS = [
+  { cmd: 'pwd', label: 'pwd (¿Dónde estoy?)', desc: 'Muestra la carpeta actual' },
+  { cmd: 'ls -la', label: 'ls -la (Ver archivos)', desc: 'Lista archivos y permisos ocultos' },
+  { cmd: 'whoami', label: 'whoami (¿Quién soy?)', desc: 'Muestra tu usuario actual' },
+  { cmd: 'help', label: 'help (Ayuda)', desc: 'Muestra los comandos de esta sala' },
+];
 
 export const ExerciseVMWorkbench: React.FC<ExerciseVMWorkbenchProps> = ({
   scaffoldingLevel,
@@ -55,9 +67,13 @@ export const ExerciseVMWorkbench: React.FC<ExerciseVMWorkbenchProps> = ({
   lastExecutedExplanation,
   onRunCommand,
   onResetNode,
+  onExplainTerminalWithAI,
 }) => {
   const [vmTab, setVmTab] = useState<'terminal' | 'sandbox'>('terminal');
+  const [activeObjectiveIdx, setActiveObjectiveIdx] = useState<number>(0);
   const [revealedCommands, setRevealedCommands] = useState<Record<number, boolean>>({});
+  const [copiedIp, setCopiedIp] = useState(false);
+  const [showBeginnerGuide, setShowBeginnerGuide] = useState(false);
 
   // Static Script Analyzer state
   const [sandboxLang, setSandboxLang] = useState<'python' | 'bash'>('python');
@@ -68,174 +84,251 @@ export const ExerciseVMWorkbench: React.FC<ExerciseVMWorkbenchProps> = ({
     typeof runSecurityScriptSandbox
   > | null>(null);
 
+  const safeObjectiveIdx =
+    commandBlocks && commandBlocks.length > 0
+      ? Math.min(activeObjectiveIdx, commandBlocks.length - 1)
+      : 0;
+  const activeCmdObj = commandBlocks?.[safeObjectiveIdx];
+
+  const lastCmd = vmHistory.length > 0 ? vmHistory[vmHistory.length - 1] : 'ls -la';
+  const lastOut =
+    [...vmLogs]
+      .reverse()
+      .find((l) => l.type === 'output' || l.type === 'hint')?.text || '';
+
+  const handleCopyTargetIp = () => {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(vmNode.ip).catch(() => {});
+    }
+    setCopiedIp(true);
+    setTimeout(() => setCopiedIp(false), 1800);
+  };
+
   return (
-    <div className="space-y-4">
-      {/* Progressive Scaffolding Command Cards */}
-      {commandBlocks && commandBlocks.length > 0 && (
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-xs font-mono uppercase tracking-wider text-slate-600 font-bold">
-              {scaffoldingLevel === 'Guiado Paso a Paso'
-                ? 'MODALIDAD GUIADA (SALAS 00–04): PULSA EN ORDEN O ESCRIBE EL COMANDO EN LA CONSOLA'
-                : scaffoldingLevel === 'Andamiaje con Pistas'
-                  ? 'MODALIDAD INTERMEDIA (SALAS 05–08): INTENTA ESCRIBIR EL COMANDO EN LA CONSOLA O REVELA LA AYUDA'
-                  : 'MODALIDAD AUTÓNOMA SENIOR (SALAS 09–12): RESUELVE EL OBJETIVO EN LA TERMINAL'}
-            </h3>
-            <span className="px-2.5 py-0.5 rounded text-[11px] font-mono bg-slate-100 text-slate-700 border border-slate-300">
-              Andamiaje: {scaffoldingLevel}
+    <div className="space-y-3">
+      {/* TryHackMe AttackBox & Target Machine Status Header */}
+      <div className="rounded-2xl border-2 border-slate-800 bg-[#0D1117] overflow-hidden shadow-xl">
+        {/* Top Target & Machine Status Bar */}
+        <div className="bg-[#161E2E] px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-500/40 text-[#88CC14] text-[11px] font-mono font-bold">
+              <span className="w-2 h-2 rounded-full bg-[#88CC14]" />
+              ATTACKBOX ACTIVA
+            </span>
+            <span className="text-xs font-mono font-bold text-white">
+              {vmNode.hostname}
+            </span>
+            <button
+              type="button"
+              onClick={handleCopyTargetIp}
+              className="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-mono text-sky-300 flex items-center gap-1 cursor-pointer"
+              title="Copiar dirección IP del objetivo"
+            >
+              <span>IP: {vmNode.ip}</span>
+              <Copy className="w-3 h-3" />
+              {copiedIp && <span className="text-[#88CC14] font-bold">Copiada</span>}
+            </button>
+            <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[11px] font-mono text-slate-300 flex items-center gap-1">
+              <FolderOpen className="w-3 h-3 text-amber-400" />
+              {vmCwd}
             </span>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {commandBlocks.map((cmdObj, cIdx) => {
-              const alreadyRan = vmHistory.includes(cmdObj.command);
-              const isGuided = scaffoldingLevel === 'Guiado Paso a Paso';
-              const isRevealed = isGuided || revealedCommands[cIdx] || alreadyRan;
+          <div className="flex items-center gap-1.5">
+            {onExplainTerminalWithAI && (
+              <button
+                type="button"
+                onClick={() => onExplainTerminalWithAI(lastCmd, lastOut)}
+                className="px-2.5 py-1 rounded-lg bg-[#88CC14]/20 hover:bg-[#88CC14]/30 border border-[#88CC14]/50 text-[#88CC14] text-xs font-mono font-bold flex items-center gap-1 cursor-pointer"
+                title="La IA analiza tu último comando y te explica qué hacer ahora"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                Explicar Consola con IA
+              </button>
+            )}
 
-              return (
-                <div
-                  key={cIdx}
-                  className={`p-4 rounded-xl border flex flex-col justify-between gap-3 transition-all ${
-                    alreadyRan
-                      ? 'bg-emerald-50/60 border-emerald-400'
-                      : 'bg-slate-900 border-slate-800 text-white'
-                  }`}
-                >
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span
-                        className={`px-2 py-0.5 rounded text-xs font-mono font-bold ${
-                          alreadyRan
-                            ? 'bg-emerald-600 text-white'
-                            : 'bg-[#88CC14] text-slate-950'
-                        }`}
-                      >
-                        Objetivo {cIdx + 1}
-                      </span>
-                      {alreadyRan && (
-                        <span className="text-xs font-mono text-emerald-700 font-bold flex items-center gap-1">
-                          <Check className="w-3.5 h-3.5" /> Completado
-                        </span>
-                      )}
-                    </div>
-
-                    <p
-                      className={`text-xs font-bold ${
-                        alreadyRan ? 'text-slate-900' : 'text-white'
-                      }`}
-                    >
-                      {cmdObj.label}
-                    </p>
-
-                    {isRevealed ? (
-                      <code
-                        className={`block p-2 rounded text-xs font-mono break-all ${
-                          alreadyRan
-                            ? 'bg-slate-900 text-[#88CC14]'
-                            : 'bg-slate-950 text-[#88CC14]'
-                        }`}
-                      >
-                        $ {cmdObj.command}
-                      </code>
-                    ) : (
-                      <div className="p-2 rounded bg-slate-950 border border-slate-800 text-[11px] font-mono text-slate-400">
-                        Comando oculto para entrenar memoria activa. Escríbelo abajo o pulsa &quot;Revelar sintaxis&quot;.
-                      </div>
-                    )}
-
-                    <p
-                      className={`text-xs leading-relaxed ${
-                        alreadyRan ? 'text-slate-700' : 'text-slate-300'
-                      }`}
-                    >
-                      {cmdObj.explanation}
-                    </p>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    {!isRevealed && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setRevealedCommands((prev) => ({ ...prev, [cIdx]: true }))
-                        }
-                        className="w-full py-1.5 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        Revelar sintaxis del comando
-                      </button>
-                    )}
-
-                    {isRevealed && (
-                      <button
-                        type="button"
-                        onClick={() => onRunCommand(cmdObj.command, cmdObj.explanation)}
-                        className="w-full py-2 px-3 rounded-lg bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                      >
-                        <Play className="w-3.5 h-3.5 fill-current" />
-                        Ejecutar en Estación de Práctica
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+            <div className="flex items-center gap-1 bg-[#0F172A] p-1 rounded-lg border border-slate-800">
+              <button
+                type="button"
+                onClick={() => setVmTab('terminal')}
+                className={`px-2.5 py-1 rounded text-xs font-mono transition-colors cursor-pointer ${
+                  vmTab === 'terminal'
+                    ? 'bg-[#88CC14] text-slate-950 font-bold'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                Terminal
+              </button>
+              <button
+                type="button"
+                onClick={() => setVmTab('sandbox')}
+                className={`px-2.5 py-1 rounded text-xs font-mono transition-colors cursor-pointer ${
+                  vmTab === 'sandbox'
+                    ? 'bg-[#88CC14] text-slate-950 font-bold'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                Script Sandbox
+              </button>
+            </div>
           </div>
         </div>
-      )}
 
-      {/* Embedded Terminal & Static Script Analyzer */}
-      <div className="rounded-2xl border-2 border-slate-800 bg-[#0D1117] overflow-hidden shadow-lg">
-        <div className="bg-[#161E2E] px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Terminal className="w-4 h-4 text-[#88CC14]" />
-            <span className="text-xs font-mono font-bold text-white">
-              Estación de Práctica · {vmNode.hostname} ({vmNode.ip}) · cwd: {vmCwd}
-            </span>
-            {capturedFlag && (
-              <span className="px-2 py-0.5 rounded text-xs font-mono font-bold bg-[#88CC14] text-slate-950">
-                ✓ FLAG CAPTURADA: {capturedFlag}
-              </span>
+        {/* Compact Step-by-Step Lab Objectives inside the AttackBox Header */}
+        {vmTab === 'terminal' && commandBlocks && commandBlocks.length > 0 && (
+          <div className="bg-[#111827] px-4 py-3 border-b border-slate-800 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-mono uppercase text-slate-400 font-bold mr-1">
+                  PASOS GUIADOS:
+                </span>
+                {commandBlocks.map((cmdObj, cIdx) => {
+                  const alreadyRan = vmHistory.includes(cmdObj.command);
+                  const isSelected = safeObjectiveIdx === cIdx;
+                  return (
+                    <button
+                      key={cIdx}
+                      type="button"
+                      onClick={() => setActiveObjectiveIdx(cIdx)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold flex items-center gap-1 transition-all cursor-pointer border ${
+                        isSelected
+                          ? 'bg-[#88CC14] text-slate-950 border-[#88CC14]'
+                          : alreadyRan
+                            ? 'bg-emerald-950/70 text-emerald-300 border-emerald-500/40'
+                            : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500'
+                      }`}
+                    >
+                      {alreadyRan && <Check className="w-3 h-3" />}
+                      <span>Paso {cIdx + 1}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowBeginnerGuide((prev) => !prev)}
+                className="text-[11px] font-mono text-sky-400 hover:text-sky-300 flex items-center gap-1 cursor-pointer"
+              >
+                <HelpCircle className="w-3.5 h-3.5" />
+                {showBeginnerGuide ? 'Ocultar ayuda básica' : '¿Nuevo en la terminal? Ver comandos básicos'}
+              </button>
+            </div>
+
+            {/* Active Objective Compact Action Box */}
+            {activeCmdObj && (
+              <div className="p-3 rounded-xl bg-[#0F172A] border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-white">
+                      {activeCmdObj.label}
+                    </span>
+                    {vmHistory.includes(activeCmdObj.command) && (
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-[#88CC14] text-[10px] font-mono font-bold">
+                        ✓ EJECUTADO
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    {activeCmdObj.explanation}
+                  </p>
+                  {(scaffoldingLevel === 'Guiado Paso a Paso' ||
+                    revealedCommands[safeObjectiveIdx] ||
+                    vmHistory.includes(activeCmdObj.command)) ? (
+                    <code className="inline-block px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-xs font-mono text-[#88CC14]">
+                      $ {activeCmdObj.command}
+                    </code>
+                  ) : (
+                    <span className="inline-block text-[11px] font-mono text-amber-300">
+                      Intenta escribir el comando abajo o pulsa &quot;Revelar comando&quot;
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  {!(
+                    scaffoldingLevel === 'Guiado Paso a Paso' ||
+                    revealedCommands[safeObjectiveIdx] ||
+                    vmHistory.includes(activeCmdObj.command)
+                  ) ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setRevealedCommands((prev) => ({
+                          ...prev,
+                          [safeObjectiveIdx]: true,
+                        }))
+                      }
+                      className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      Revelar comando
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onRunCommand(activeCmdObj.command, activeCmdObj.explanation);
+                        if (safeObjectiveIdx < commandBlocks.length - 1) {
+                          setActiveObjectiveIdx(safeObjectiveIdx + 1);
+                        }
+                      }}
+                      className="px-3.5 py-2 rounded-lg bg-[#88CC14] hover:bg-[#9be31b] text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      Ejecutar Paso {safeObjectiveIdx + 1}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Beginner Quick Commands Helper */}
+            {showBeginnerGuide && (
+              <div className="p-2.5 rounded-xl bg-sky-950/40 border border-sky-500/30 space-y-2">
+                <p className="text-[11px] text-sky-200">
+                  <strong>Guía rápida desde cero:</strong> Haz clic en cualquiera de estos comandos básicos para ejecutarlo en la consola y ver qué responde Linux:
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {BEGINNER_QUICK_COMMANDS.map((item) => (
+                    <button
+                      key={item.cmd}
+                      type="button"
+                      onClick={() => onRunCommand(item.cmd, item.desc)}
+                      className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-sky-500/30 text-xs font-mono text-sky-300 cursor-pointer"
+                      title={item.desc}
+                    >
+                      ▶ {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
-
-          <div className="flex items-center gap-1 bg-[#0F172A] p-1 rounded-lg border border-slate-800">
-            <button
-              type="button"
-              onClick={() => setVmTab('terminal')}
-              className={`px-3 py-1 rounded text-xs font-mono transition-colors cursor-pointer ${
-                vmTab === 'terminal'
-                  ? 'bg-[#88CC14] text-slate-950 font-bold'
-                  : 'text-slate-300 hover:text-white'
-              }`}
-            >
-              Consola Linux Interactiva
-            </button>
-            <button
-              type="button"
-              onClick={() => setVmTab('sandbox')}
-              className={`px-3 py-1 rounded text-xs font-mono transition-colors cursor-pointer ${
-                vmTab === 'sandbox'
-                  ? 'bg-[#88CC14] text-slate-950 font-bold'
-                  : 'text-slate-300 hover:text-white'
-              }`}
-            >
-              Analizador Estático Python/Bash
-            </button>
-          </div>
-        </div>
+        )}
 
         {vmTab === 'terminal' ? (
           <div>
-            {lastExecutedExplanation && (
-              <div className="px-4 py-2.5 bg-emerald-950/60 border-b border-emerald-500/30 text-xs text-emerald-200 flex items-center justify-between gap-2">
-                <span>
-                  <strong>Explicación de la operación:</strong> {lastExecutedExplanation}
+            {/* Flag Captured Banner inside Terminal */}
+            {capturedFlag && (
+              <div className="px-4 py-2 bg-[#88CC14]/20 border-b border-[#88CC14]/50 text-xs font-mono text-[#88CC14] font-bold flex items-center justify-between gap-2">
+                <span>🎯 ¡BANDERA CAPTURADA EN CONSOLA!: {capturedFlag}</span>
+                <span className="text-[11px] text-emerald-200">
+                  Copiada automáticamente a la pregunta de Task 3
                 </span>
               </div>
             )}
 
-            <div className="p-4 h-72 overflow-y-auto font-mono text-xs space-y-2.5 bg-[#0D1117]">
+            {lastExecutedExplanation && (
+              <div className="px-4 py-2 bg-emerald-950/60 border-b border-emerald-500/30 text-xs text-emerald-200 flex items-center justify-between gap-2">
+                <span>
+                  <strong>Qué acaba de hacer este comando:</strong> {lastExecutedExplanation}
+                </span>
+              </div>
+            )}
+
+            {/* Terminal Output Window */}
+            <div className="p-4 h-80 overflow-y-auto font-mono text-xs space-y-2.5 bg-[#0D1117]">
               {vmLogs.map((log, index) => (
                 <div key={index}>
                   {log.type === 'input' && (
@@ -247,14 +340,24 @@ export const ExerciseVMWorkbench: React.FC<ExerciseVMWorkbenchProps> = ({
                     </pre>
                   )}
                   {log.type === 'hint' && (
-                    <div className="p-2.5 rounded bg-amber-950/60 border border-amber-500/40 text-amber-200">
-                      {log.text}
+                    <div className="p-2.5 rounded bg-amber-950/60 border border-amber-500/40 text-amber-200 flex items-center justify-between gap-2">
+                      <span>{log.text}</span>
+                      {onExplainTerminalWithAI && (
+                        <button
+                          type="button"
+                          onClick={() => onExplainTerminalWithAI(lastCmd, log.text)}
+                          className="px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-[11px] font-bold shrink-0 cursor-pointer"
+                        >
+                          Ayuda IA
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
               ))}
             </div>
 
+            {/* Terminal Prompt Input Form */}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -269,7 +372,7 @@ export const ExerciseVMWorkbench: React.FC<ExerciseVMWorkbenchProps> = ({
                 type="text"
                 value={vmInput}
                 onChange={(e) => onChangeVmInput(e.target.value)}
-                placeholder="Escribe un comando (ej. help, pwd, ls -la, cd /tmp, sudo -l)..."
+                placeholder="Escribe un comando aquí (ej. ls -la, pwd, help)..."
                 className="flex-1 bg-[#0D1117] border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-[#88CC14]"
               />
               <button
@@ -288,7 +391,7 @@ export const ExerciseVMWorkbench: React.FC<ExerciseVMWorkbenchProps> = ({
                 title="Reiniciar estado de archivos y permisos de este nodo"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                Reiniciar VM
+                Reiniciar
               </button>
             </form>
           </div>
@@ -331,7 +434,7 @@ export const ExerciseVMWorkbench: React.FC<ExerciseVMWorkbenchProps> = ({
                   Bash POSIX
                 </button>
                 <span className="text-[11px] font-mono text-slate-400">
-                  Verifica sintaxis real, balance de bloques y antipatrones de seguridad (shell=True, eval, except: pass)
+                  Verifica sintaxis y antipatrones de seguridad (shell=True, eval)
                 </span>
               </div>
 
